@@ -1,5 +1,5 @@
-use serde::Serialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -22,13 +22,24 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().collect();
     let config = Config::from_args(&args)?;
     let history = collect_history(&config.repo_path)?;
+    let tree = build_repo_tree(&config.repo_path, &config.output_dir)?;
+    let detected_technologies = detect_technologies(&config.repo_path, &tree)?;
+    let skills_result = match config.skills_database.as_ref() {
+        Some(skills_config) => {
+            add_skills_from_database(skills_config, &config.output_dir, &detected_technologies)?
+        }
+        None => SkillsIntegration::default(),
+    };
     let report = RepoReport {
         repo_name: repo_display_name(&config.repo_path),
         scanned_commits: history.scanned_commits,
         file_histories: history.file_histories,
         directory_histories: history.directory_histories,
-        tree: build_repo_tree(&config.repo_path, &config.output_dir)?,
+        tree,
         agent_profile: config.agent_profile,
+        detected_technologies,
+        added_skills: skills_result.added_skills,
+        skills_manifest_href: skills_result.skills_manifest_href,
     };
 
     write_report(&config.output_dir, &report)?;
@@ -47,6 +58,13 @@ struct Config {
     repo_path: PathBuf,
     output_dir: PathBuf,
     agent_profile: AgentProfile,
+    skills_database: Option<SkillsDatabaseConfig>,
+}
+
+#[derive(Clone, Debug)]
+struct SkillsDatabaseConfig {
+    database_path: PathBuf,
+    install_dir: PathBuf,
 }
 
 impl Config {
@@ -54,6 +72,8 @@ impl Config {
         let program_name = args.first().map_or("history-to-md", String::as_str);
         let mut positionals = Vec::new();
         let mut agent_profile = AgentProfile::Generic;
+        let mut skills_database_path: Option<PathBuf> = None;
+        let mut skills_install_dir: Option<PathBuf> = None;
         let mut index = 1;
 
         while index < args.len() {
@@ -66,6 +86,26 @@ impl Config {
                         ));
                     };
                     agent_profile = AgentProfile::parse(value)?;
+                    index += 2;
+                }
+                "--skills-db" => {
+                    let Some(value) = args.get(index + 1) else {
+                        return Err(format!(
+                            "missing value for --skills-db\n{}",
+                            usage(program_name)
+                        ));
+                    };
+                    skills_database_path = Some(PathBuf::from(value));
+                    index += 2;
+                }
+                "--skills-dir" => {
+                    let Some(value) = args.get(index + 1) else {
+                        return Err(format!(
+                            "missing value for --skills-dir\n{}",
+                            usage(program_name)
+                        ));
+                    };
+                    skills_install_dir = Some(PathBuf::from(value));
                     index += 2;
                 }
                 argument if argument.starts_with("--") => {
@@ -98,17 +138,44 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| repo_path.join(DEFAULT_OUTPUT_DIR));
 
+        let skills_database = match skills_database_path {
+            Some(database_path) => {
+                if !database_path.exists() {
+                    return Err(format!(
+                        "skills database path does not exist: {}",
+                        database_path.display()
+                    ));
+                }
+
+                let install_dir = skills_install_dir.unwrap_or_else(|| output_dir.join("skills"));
+                Some(SkillsDatabaseConfig {
+                    database_path,
+                    install_dir,
+                })
+            }
+            None => {
+                if let Some(install_dir) = skills_install_dir {
+                    return Err(format!(
+                        "--skills-dir requires --skills-db (got {})",
+                        install_dir.display()
+                    ));
+                }
+                None
+            }
+        };
+
         Ok(Self {
             repo_path,
             output_dir,
             agent_profile,
+            skills_database,
         })
     }
 }
 
 fn usage(program_name: &str) -> String {
     format!(
-        "usage: {program_name} [--agent <{}>] <repo-path> [output-dir]",
+        "usage: {program_name} [--agent <{}>] [--skills-db <path>] [--skills-dir <path>] <repo-path> [output-dir]",
         AgentProfile::supported_names().join("|")
     )
 }
@@ -201,6 +268,54 @@ impl AgentProfile {
             }
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct DetectedTechnology {
+    id: String,
+    name: String,
+    evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct AddedSkill {
+    id: String,
+    title: String,
+    description: String,
+    matched_technologies: Vec<String>,
+    location: String,
+    href: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SkillsIntegration {
+    added_skills: Vec<AddedSkill>,
+    skills_manifest_href: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillsDatabase {
+    skills: Vec<SkillsDatabaseEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SkillsDatabaseEntry {
+    id: String,
+    title: String,
+    description: String,
+    technologies: Vec<String>,
+    #[serde(default)]
+    match_mode: SkillMatchMode,
+    source: Option<String>,
+    install_as: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum SkillMatchMode {
+    #[default]
+    Any,
+    All,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -301,6 +416,9 @@ struct RepoReport {
     directory_histories: HashMap<String, PathHistory>,
     tree: TreeNode,
     agent_profile: AgentProfile,
+    detected_technologies: Vec<DetectedTechnology>,
+    added_skills: Vec<AddedSkill>,
+    skills_manifest_href: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -318,6 +436,9 @@ struct HtmlReportData {
     scanned_commits: u64,
     changed_files: usize,
     changed_directories: usize,
+    detected_technologies: Vec<DetectedTechnology>,
+    added_skills: Vec<AddedSkill>,
+    skills_manifest_href: Option<String>,
     nodes: Vec<NodeView>,
 }
 
@@ -338,6 +459,450 @@ struct NodeView {
 struct ReportLink {
     label: String,
     href: String,
+}
+
+fn detect_technologies(
+    repo_path: &Path,
+    tree: &TreeNode,
+) -> Result<Vec<DetectedTechnology>, String> {
+    let mut files = Vec::new();
+    collect_file_paths(tree, &mut files);
+    let file_set: HashSet<&str> = files.iter().map(String::as_str).collect();
+    let mut detected = Vec::new();
+
+    push_detected_technology(
+        &mut detected,
+        "docker",
+        "Docker",
+        vec![
+            find_exact_path(&file_set, &files, "Dockerfile"),
+            find_suffix_path(&files, ".dockerfile"),
+            find_exact_path(&file_set, &files, "docker-compose.yml"),
+            find_exact_path(&file_set, &files, "docker-compose.yaml"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "go",
+        "Go",
+        vec![
+            find_exact_path(&file_set, &files, "go.mod"),
+            find_path_with_extension(&files, "go"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "java",
+        "Java",
+        vec![
+            find_exact_path(&file_set, &files, "pom.xml"),
+            find_exact_path(&file_set, &files, "build.gradle"),
+            find_path_with_extension(&files, "java"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "javascript",
+        "JavaScript",
+        vec![
+            find_exact_path(&file_set, &files, "package.json"),
+            find_path_with_extension(&files, "js"),
+            find_path_with_extension(&files, "jsx"),
+            find_path_with_extension(&files, "mjs"),
+            find_path_with_extension(&files, "cjs"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "kotlin",
+        "Kotlin",
+        vec![
+            find_exact_path(&file_set, &files, "build.gradle.kts"),
+            find_path_with_extension(&files, "kt"),
+            find_path_with_extension(&files, "kts"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "kubernetes",
+        "Kubernetes",
+        vec![
+            find_exact_path(&file_set, &files, "Chart.yaml"),
+            find_exact_path(&file_set, &files, "kustomization.yaml"),
+            find_exact_path(&file_set, &files, "kustomization.yml"),
+            find_prefix_path(&files, "k8s/"),
+            find_prefix_path(&files, "helm/"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "nodejs",
+        "Node.js",
+        vec![find_exact_path(&file_set, &files, "package.json")],
+    );
+    push_detected_technology(
+        &mut detected,
+        "python",
+        "Python",
+        vec![
+            find_exact_path(&file_set, &files, "pyproject.toml"),
+            find_exact_path(&file_set, &files, "requirements.txt"),
+            find_exact_path(&file_set, &files, "setup.py"),
+            find_path_with_extension(&files, "py"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "rust",
+        "Rust",
+        vec![
+            find_exact_path(&file_set, &files, "Cargo.toml"),
+            find_path_with_extension(&files, "rs"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "terraform",
+        "Terraform",
+        vec![
+            find_path_with_extension(&files, "tf"),
+            find_path_with_extension(&files, "tfvars"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "typescript",
+        "TypeScript",
+        vec![
+            find_exact_path(&file_set, &files, "tsconfig.json"),
+            find_path_with_extension(&files, "ts"),
+            find_path_with_extension(&files, "tsx"),
+        ],
+    );
+    push_detected_technology(
+        &mut detected,
+        "react",
+        "React",
+        vec![
+            file_contains_any(
+                repo_path,
+                "package.json",
+                &["\"react\"", "\"next\"", "\"@types/react\""],
+            )?,
+            find_path_with_extension(&files, "jsx"),
+            find_path_with_extension(&files, "tsx"),
+        ],
+    );
+
+    detected.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(detected)
+}
+
+fn add_skills_from_database(
+    config: &SkillsDatabaseConfig,
+    output_dir: &Path,
+    detected_technologies: &[DetectedTechnology],
+) -> Result<SkillsIntegration, String> {
+    let database = load_skills_database(&config.database_path)?;
+    let detected_ids: HashSet<&str> = detected_technologies
+        .iter()
+        .map(|tech| tech.id.as_str())
+        .collect();
+    let database_root = config
+        .database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let mut added_skills = Vec::new();
+
+    fs::create_dir_all(&config.install_dir).map_err(|error| {
+        format!(
+            "failed to create skills install directory {}: {error}",
+            config.install_dir.display()
+        )
+    })?;
+
+    for skill in database.skills {
+        let matched_ids = matched_technology_ids(&skill, &detected_ids);
+        if matched_ids.is_empty() {
+            continue;
+        }
+
+        let matched_technologies = detected_technologies
+            .iter()
+            .filter(|technology| matched_ids.iter().any(|id| *id == technology.id))
+            .map(|technology| technology.name.clone())
+            .collect::<Vec<_>>();
+
+        let location_name = skill
+            .install_as
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| skill.id.clone());
+        let destination = config.install_dir.join(&location_name);
+        let source = skill.source.as_deref().ok_or_else(|| {
+            format!(
+                "matched skill '{}' is missing a source path in {}",
+                skill.id,
+                config.database_path.display()
+            )
+        })?;
+        let source_path = database_root.join(source);
+        let source_metadata = fs::metadata(&source_path).map_err(|error| {
+            format!(
+                "failed to inspect skill source {}: {error}",
+                source_path.display()
+            )
+        })?;
+        copy_path_recursively(&source_path, &destination)?;
+        let linked_location = preferred_skill_link_target(&destination, source_metadata.is_dir());
+
+        added_skills.push(AddedSkill {
+            id: skill.id,
+            title: skill.title,
+            description: skill.description,
+            matched_technologies,
+            location: display_skill_location(&linked_location),
+            href: relative_href(output_dir, &linked_location),
+        });
+    }
+
+    let skills_manifest_href = if !added_skills.is_empty() {
+        let manifest_path = config.install_dir.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            render_skills_manifest(detected_technologies, &added_skills)?,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to write skills manifest {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+        relative_href(output_dir, &manifest_path)
+    } else {
+        None
+    };
+
+    Ok(SkillsIntegration {
+        added_skills,
+        skills_manifest_href,
+    })
+}
+
+fn load_skills_database(database_path: &Path) -> Result<SkillsDatabase, String> {
+    let contents = fs::read_to_string(database_path).map_err(|error| {
+        format!(
+            "failed to read skills database {}: {error}",
+            database_path.display()
+        )
+    })?;
+
+    serde_json::from_str(&contents).map_err(|error| {
+        format!(
+            "failed to parse skills database {}: {error}",
+            database_path.display()
+        )
+    })
+}
+
+fn matched_technology_ids<'a>(
+    skill: &'a SkillsDatabaseEntry,
+    detected_ids: &HashSet<&str>,
+) -> Vec<&'a str> {
+    let normalized_ids = skill
+        .technologies
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    let matches = normalized_ids
+        .iter()
+        .copied()
+        .filter(|technology| detected_ids.contains(technology))
+        .collect::<Vec<_>>();
+
+    match skill.match_mode {
+        SkillMatchMode::Any => matches,
+        SkillMatchMode::All if matches.len() == normalized_ids.len() => matches,
+        SkillMatchMode::All => Vec::new(),
+    }
+}
+
+fn render_skills_manifest(
+    detected_technologies: &[DetectedTechnology],
+    added_skills: &[AddedSkill],
+) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct SkillsManifest<'a> {
+        generated_by: &'static str,
+        detected_technologies: &'a [DetectedTechnology],
+        added_skills: &'a [AddedSkill],
+    }
+
+    serde_json::to_string_pretty(&SkillsManifest {
+        generated_by: "history-to-md",
+        detected_technologies,
+        added_skills,
+    })
+    .map_err(|error| format!("failed to serialize skills manifest: {error}"))
+}
+
+fn collect_file_paths(node: &TreeNode, files: &mut Vec<String>) {
+    if node.is_dir {
+        for child in &node.children {
+            collect_file_paths(child, files);
+        }
+        return;
+    }
+
+    if !node.path.is_empty() {
+        files.push(node.path.clone());
+    }
+}
+
+fn push_detected_technology(
+    detected: &mut Vec<DetectedTechnology>,
+    id: &str,
+    name: &str,
+    evidence: Vec<Option<String>>,
+) {
+    let evidence = evidence.into_iter().flatten().collect::<Vec<_>>();
+    if evidence.is_empty() {
+        return;
+    }
+
+    detected.push(DetectedTechnology {
+        id: id.to_string(),
+        name: name.to_string(),
+        evidence,
+    });
+}
+
+fn find_exact_path(file_set: &HashSet<&str>, files: &[String], exact_path: &str) -> Option<String> {
+    if file_set.contains(exact_path) {
+        return Some(format!("Found `{exact_path}`"));
+    }
+
+    files
+        .iter()
+        .find(|path| path.ends_with(&format!("/{exact_path}")))
+        .map(|path| format!("Found `{path}`"))
+}
+
+fn find_prefix_path(files: &[String], prefix: &str) -> Option<String> {
+    files
+        .iter()
+        .find(|path| path.starts_with(prefix))
+        .map(|path| format!("Found `{path}`"))
+}
+
+fn find_suffix_path(files: &[String], suffix: &str) -> Option<String> {
+    files
+        .iter()
+        .find(|path| path.ends_with(suffix))
+        .map(|path| format!("Found `{path}`"))
+}
+
+fn find_path_with_extension(files: &[String], extension: &str) -> Option<String> {
+    let expected = format!(".{extension}");
+    files
+        .iter()
+        .find(|path| path.ends_with(&expected))
+        .map(|path| format!("Found `{path}`"))
+}
+
+fn file_contains_any(
+    repo_path: &Path,
+    relative_path: &str,
+    needles: &[&str],
+) -> Result<Option<String>, String> {
+    let file_path = repo_path.join(relative_path);
+    if !file_path.is_file() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(&file_path).map_err(|error| {
+        format!(
+            "failed to read technology marker file {}: {error}",
+            file_path.display()
+        )
+    })?;
+
+    Ok(needles
+        .iter()
+        .find(|needle| contents.contains(**needle))
+        .map(|needle| format!("Found `{relative_path}` containing `{needle}`")))
+}
+
+fn copy_path_recursively(source: &Path, destination: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(source)
+        .map_err(|error| format!("failed to read skill source {}: {error}", source.display()))?;
+
+    if metadata.is_dir() {
+        fs::create_dir_all(destination).map_err(|error| {
+            format!(
+                "failed to create skill directory {}: {error}",
+                destination.display()
+            )
+        })?;
+        for entry in fs::read_dir(source).map_err(|error| {
+            format!(
+                "failed to read skill directory {}: {error}",
+                source.display()
+            )
+        })? {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "failed to read entry under skill directory {}: {error}",
+                    source.display()
+                )
+            })?;
+            copy_path_recursively(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create parent directory for {}: {error}",
+                destination.display()
+            )
+        })?;
+    }
+
+    fs::copy(source, destination).map_err(|error| {
+        format!(
+            "failed to copy skill {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn relative_href(output_dir: &Path, target_path: &Path) -> Option<String> {
+    target_path
+        .strip_prefix(output_dir)
+        .ok()
+        .map(path_to_string)
+}
+
+fn display_skill_location(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn preferred_skill_link_target(path: &Path, is_directory: bool) -> PathBuf {
+    if !is_directory {
+        return path.to_path_buf();
+    }
+
+    let skill_markdown = path.join("SKILL.md");
+    if skill_markdown.exists() {
+        skill_markdown
+    } else {
+        path.to_path_buf()
+    }
 }
 
 fn collect_history(repo_path: &Path) -> Result<HistoryReport, String> {
@@ -673,6 +1238,74 @@ fn render_summary(report: &RepoReport) -> String {
         report.directory_histories.len().saturating_sub(1)
     )
     .unwrap();
+    writeln!(
+        &mut markdown,
+        "- Detected technologies: {}",
+        format_detected_technologies(&report.detected_technologies)
+    )
+    .unwrap();
+    writeln!(
+        &mut markdown,
+        "- Added skills: {}",
+        if report.added_skills.is_empty() {
+            "none".to_string()
+        } else {
+            report
+                .added_skills
+                .iter()
+                .map(|skill| skill.title.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    )
+    .unwrap();
+    writeln!(&mut markdown).unwrap();
+    writeln!(&mut markdown, "## Technology detection").unwrap();
+    writeln!(&mut markdown).unwrap();
+    if report.detected_technologies.is_empty() {
+        writeln!(&mut markdown, "- No technologies detected.").unwrap();
+    } else {
+        for technology in &report.detected_technologies {
+            writeln!(
+                &mut markdown,
+                "- {}: {}",
+                technology.name,
+                technology.evidence.join(", ")
+            )
+            .unwrap();
+        }
+    }
+    writeln!(&mut markdown).unwrap();
+    writeln!(&mut markdown, "## Skills from database").unwrap();
+    writeln!(&mut markdown).unwrap();
+    if report.added_skills.is_empty() {
+        writeln!(
+            &mut markdown,
+            "- No matching skills were added from a skills database."
+        )
+        .unwrap();
+    } else {
+        for skill in &report.added_skills {
+            let location = markdown_link_or_code(&skill.location, skill.href.as_deref());
+            writeln!(
+                &mut markdown,
+                "- {}: {} Matched technologies: {}. Installed at {}.",
+                skill.title,
+                skill.description,
+                skill.matched_technologies.join(", "),
+                location
+            )
+            .unwrap();
+        }
+        if let Some(manifest_href) = report.skills_manifest_href.as_deref() {
+            writeln!(
+                &mut markdown,
+                "- Skills manifest: [manifest.json](./{})",
+                manifest_href
+            )
+            .unwrap();
+        }
+    }
     writeln!(&mut markdown).unwrap();
     writeln!(&mut markdown, "## Hotspots by commit count").unwrap();
     writeln!(&mut markdown).unwrap();
@@ -858,6 +1491,9 @@ fn render_html_viewer(report: &RepoReport) -> Result<String, String> {
         scanned_commits: report.scanned_commits,
         changed_files: report.file_histories.len(),
         changed_directories: report.directory_histories.len().saturating_sub(1),
+        detected_technologies: report.detected_technologies.clone(),
+        added_skills: report.added_skills.clone(),
+        skills_manifest_href: report.skills_manifest_href.clone(),
         nodes: collect_node_views(report),
     };
     let serialized_data = serialize_for_html(&html_data)?;
@@ -877,12 +1513,14 @@ fn render_html_viewer(report: &RepoReport) -> Result<String, String> {
     .unwrap();
     writeln!(
         &mut html,
-        "<div class=\"shell\"><aside class=\"sidebar\"><div class=\"sidebar-header\"><p class=\"eyebrow\">History to MD</p><h1>{}</h1><p class=\"meta\">{} commits scanned • {} files with history • {} folders with history</p><p class=\"meta\">Markdown profile: {}</p></div><nav class=\"tree\">{}</nav></aside><main class=\"content\"><div class=\"panel\" id=\"node-details\"></div></main></div>",
+        "<div class=\"shell\"><aside class=\"sidebar\"><div class=\"sidebar-header\"><p class=\"eyebrow\">History to MD</p><h1>{}</h1><p class=\"meta\">{} commits scanned • {} files with history • {} folders with history</p><p class=\"meta\">Markdown profile: {}</p><p class=\"meta\">{} technologies detected • {} skills added</p></div><nav class=\"tree\">{}</nav></aside><main class=\"content\"><div class=\"panel\" id=\"node-details\"></div></main></div>",
         escape_html(&report.repo_name),
         report.scanned_commits,
         report.file_histories.len(),
         report.directory_histories.len().saturating_sub(1),
         escape_html(report.agent_profile.display_name()),
+        report.detected_technologies.len(),
+        report.added_skills.len(),
         render_tree_html(&report.tree, report, 0)
     )
     .unwrap();
@@ -999,6 +1637,15 @@ fn collect_node_views_recursively(node: &TreeNode, report: &RepoReport, nodes: &
 fn relevant_report_links(node: &TreeNode, report: &RepoReport) -> Vec<ReportLink> {
     let mut links = Vec::new();
 
+    if node.path.is_empty() {
+        if let Some(manifest_href) = report.skills_manifest_href.as_ref() {
+            links.push(ReportLink {
+                label: "Skills manifest".to_string(),
+                href: manifest_href.clone(),
+            });
+        }
+    }
+
     if !node.is_dir && report.file_histories.contains_key(&node.path) {
         links.push(ReportLink {
             label: "File history".to_string(),
@@ -1084,6 +1731,25 @@ fn write_agent_format_section(markdown: &mut String, agent_profile: AgentProfile
     )
     .unwrap();
     writeln!(markdown).unwrap();
+}
+
+fn format_detected_technologies(technologies: &[DetectedTechnology]) -> String {
+    if technologies.is_empty() {
+        "none".to_string()
+    } else {
+        technologies
+            .iter()
+            .map(|technology| technology.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn markdown_link_or_code(label: &str, href: Option<&str>) -> String {
+    match href {
+        Some(href) => format!("[`{label}`](./{href})"),
+        None => format!("`{label}`"),
+    }
 }
 
 fn latest_note(history: &PathHistory) -> String {
@@ -1582,6 +2248,43 @@ function pluralize(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+function renderTechnologyList() {
+  if (!data.detected_technologies.length) {
+    return `<li class="empty-state">No technologies detected.</li>`;
+  }
+
+  return data.detected_technologies
+    .map(
+      (technology) =>
+        `<li><strong>${escapeHtml(technology.name)}</strong><br><span class="commit-meta">${escapeHtml(technology.evidence.join(", "))}</span></li>`
+    )
+    .join("");
+}
+
+function renderSkillsList() {
+  if (!data.added_skills.length) {
+    return `<li class="empty-state">No matching skills were added.</li>`;
+  }
+
+  const manifestLink = data.skills_manifest_href
+    ? `<li><a href="${encodeURI(data.skills_manifest_href)}" target="_blank" rel="noreferrer">Skills manifest</a></li>`
+    : "";
+
+  return `
+    ${data.added_skills
+      .map((skill) => {
+        const location = skill.href
+          ? `<a href="${encodeURI(skill.href)}" target="_blank" rel="noreferrer">${escapeHtml(skill.location)}</a>`
+          : `<code>${escapeHtml(skill.location)}</code>`;
+        return `<li><strong>${escapeHtml(skill.title)}</strong><br><span class="commit-meta">${escapeHtml(
+          skill.description
+        )} Matched: ${escapeHtml(skill.matched_technologies.join(", "))}. Installed at ${location}.</span></li>`;
+      })
+      .join("")}
+    ${manifestLink}
+  `;
+}
+
 function renderNode(path) {
   const node = nodeMap.get(path);
   if (!node) {
@@ -1619,6 +2322,20 @@ function renderNode(path) {
         .join("")
     : `<li class="empty-state">No generated markdown is available for this node.</li>`;
 
+  const rootSections =
+    path === ""
+      ? `
+        <section class="list-card" style="margin-top: 16px;">
+          <h3 class="section-title">Detected Technologies</h3>
+          <ul class="link-list">${renderTechnologyList()}</ul>
+        </section>
+        <section class="list-card" style="margin-top: 16px;">
+          <h3 class="section-title">Skills From Database</h3>
+          <ul class="link-list">${renderSkillsList()}</ul>
+        </section>
+      `
+      : "";
+
   detailPanel.innerHTML = `
     <div class="detail-header">
       <div>
@@ -1646,6 +2363,7 @@ function renderNode(path) {
       <h3 class="section-title">Relevant Markdown</h3>
       <ul class="link-list">${reportLinks}</ul>
     </section>
+    ${rootSections}
     <section class="list-card" style="margin-top: 16px;">
       <h3 class="section-title">Commit History (${node.commit_count})</h3>
       <ul class="commit-list">${commits}</ul>
@@ -1668,8 +2386,9 @@ renderNode("");
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentProfile, CommitMeta, Config, HistoryAccumulator, RepoReport, TreeNode,
-        ancestor_directories, build_repo_tree, collect_history, directory_markdown_path,
+        AddedSkill, AgentProfile, CommitMeta, Config, DetectedTechnology, HistoryAccumulator,
+        RepoReport, SkillsDatabaseConfig, TreeNode, add_skills_from_database, ancestor_directories,
+        build_repo_tree, collect_history, detect_technologies, directory_markdown_path,
         directory_summary_link, markdown_path, parse_commit_meta, parse_numstat_line,
         render_html_viewer, render_summary, serialize_for_html, specific_directory_chain,
         summary_link, write_report,
@@ -1785,14 +2504,171 @@ mod tests {
         assert_eq!(config.repo_path, repo_path);
         assert_eq!(config.output_dir, repo_path.join("history-md"));
         assert_eq!(config.agent_profile, AgentProfile::Codex);
+        assert!(config.skills_database.is_none());
 
         fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
+    fn config_accepts_skills_database_flags() {
+        let repo_path = unique_temp_path("history-to-md-skills-config-test");
+        let database_root = unique_temp_path("history-to-md-skills-db");
+        fs::create_dir_all(&repo_path).expect("temp repo path should be created");
+        fs::create_dir_all(&database_root).expect("skills db dir should be created");
+        fs::write(database_root.join("skills.json"), "{\"skills\":[]}")
+            .expect("skills db file should be written");
+
+        let args = vec![
+            "history-to-md".to_string(),
+            "--skills-db".to_string(),
+            database_root.join("skills.json").display().to_string(),
+            "--skills-dir".to_string(),
+            repo_path.join(".codex/skills").display().to_string(),
+            repo_path.display().to_string(),
+        ];
+        let config = Config::from_args(&args).expect("config should parse");
+        let skills_database = config
+            .skills_database
+            .expect("skills database config should be set");
+
+        assert_eq!(
+            skills_database.database_path,
+            database_root.join("skills.json")
+        );
+        assert_eq!(skills_database.install_dir, repo_path.join(".codex/skills"));
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+        fs::remove_dir_all(&database_root).expect("skills db dir should be cleaned up");
     }
 
     #[test]
     fn rejects_unknown_agent_profile() {
         let error = AgentProfile::parse("unknown").expect_err("agent parsing should fail");
         assert!(error.contains("supported agent profiles: generic, codex, claude, cursor, aider"));
+    }
+
+    #[test]
+    fn detects_technologies_from_repository_tree() {
+        let repo_path = unique_temp_path("history-to-md-tech-detect-test");
+        fs::create_dir_all(repo_path.join("src")).expect("src dir should exist");
+        fs::create_dir_all(repo_path.join("web")).expect("web dir should exist");
+        fs::write(repo_path.join("Cargo.toml"), "[package]\nname = \"demo\"\n")
+            .expect("cargo manifest should be written");
+        fs::write(
+            repo_path.join("package.json"),
+            "{\n  \"dependencies\": { \"react\": \"18.0.0\" }\n}\n",
+        )
+        .expect("package json should be written");
+        fs::write(repo_path.join("src/main.rs"), "fn main() {}\n")
+            .expect("rust file should be written");
+        fs::write(
+            repo_path.join("web/app.tsx"),
+            "export const App = () => null;\n",
+        )
+        .expect("tsx file should be written");
+        fs::write(repo_path.join("Dockerfile"), "FROM rust:1.0\n")
+            .expect("dockerfile should be written");
+
+        let tree = build_repo_tree(&repo_path, &repo_path.join("history-md"))
+            .expect("tree should build successfully");
+        let technologies =
+            detect_technologies(&repo_path, &tree).expect("technologies should detect");
+
+        let names = technologies
+            .iter()
+            .map(|technology| technology.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"Rust"));
+        assert!(names.contains(&"Node.js"));
+        assert!(names.contains(&"TypeScript"));
+        assert!(names.contains(&"React"));
+        assert!(names.contains(&"Docker"));
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
+    fn adds_matching_skills_from_database() {
+        let repo_path = unique_temp_path("history-to-md-skills-match-test");
+        let output_dir = repo_path.join("history-md");
+        let db_root = unique_temp_path("history-to-md-skills-db-match");
+        let install_dir = output_dir.join("skills");
+        fs::create_dir_all(db_root.join("rust-review")).expect("skill dir should exist");
+        fs::create_dir_all(db_root.join("frontend-review")).expect("skill dir should exist");
+        fs::write(
+            db_root.join("rust-review/SKILL.md"),
+            "# Rust Review\nUse for Rust repos.\n",
+        )
+        .expect("rust skill should be written");
+        fs::write(
+            db_root.join("frontend-review/SKILL.md"),
+            "# Frontend Review\nUse for TS and React repos.\n",
+        )
+        .expect("frontend skill should be written");
+        fs::write(
+            db_root.join("skills.json"),
+            r#"{
+  "skills": [
+    {
+      "id": "rust-review",
+      "title": "Rust Review",
+      "description": "Rust-oriented review heuristics.",
+      "technologies": ["rust"],
+      "source": "rust-review"
+    },
+    {
+      "id": "frontend-review",
+      "title": "Frontend Review",
+      "description": "Frontend heuristics for React and TypeScript.",
+      "technologies": ["react", "typescript"],
+      "match_mode": "all",
+      "source": "frontend-review"
+    },
+    {
+      "id": "go-review",
+      "title": "Go Review",
+      "description": "Go heuristics.",
+      "technologies": ["go"],
+      "source": "go-review"
+    }
+  ]
+}"#,
+        )
+        .expect("skills db should be written");
+
+        let skills = add_skills_from_database(
+            &SkillsDatabaseConfig {
+                database_path: db_root.join("skills.json"),
+                install_dir: install_dir.clone(),
+            },
+            &output_dir,
+            &[
+                DetectedTechnology {
+                    id: "react".to_string(),
+                    name: "React".to_string(),
+                    evidence: vec!["Found `package.json` containing `\"react\"`".to_string()],
+                },
+                DetectedTechnology {
+                    id: "rust".to_string(),
+                    name: "Rust".to_string(),
+                    evidence: vec!["Found `Cargo.toml`".to_string()],
+                },
+                DetectedTechnology {
+                    id: "typescript".to_string(),
+                    name: "TypeScript".to_string(),
+                    evidence: vec!["Found `web/app.tsx`".to_string()],
+                },
+            ],
+        )
+        .expect("skills should be added");
+
+        assert_eq!(skills.added_skills.len(), 2);
+        assert!(install_dir.join("rust-review/SKILL.md").exists());
+        assert!(install_dir.join("frontend-review/SKILL.md").exists());
+        assert!(install_dir.join("manifest.json").exists());
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+        fs::remove_dir_all(&db_root).expect("skills db dir should be cleaned up");
     }
 
     #[test]
@@ -1809,12 +2685,29 @@ mod tests {
                 children: Vec::new(),
             },
             agent_profile: AgentProfile::Codex,
+            detected_technologies: vec![DetectedTechnology {
+                id: "rust".to_string(),
+                name: "Rust".to_string(),
+                evidence: vec!["Found `Cargo.toml`".to_string()],
+            }],
+            added_skills: vec![AddedSkill {
+                id: "rust-review".to_string(),
+                title: "Rust Review".to_string(),
+                description: "Rust-oriented review heuristics.".to_string(),
+                matched_technologies: vec!["Rust".to_string()],
+                location: "/tmp/demo/history-md/skills/rust-review/SKILL.md".to_string(),
+                href: Some("skills/rust-review/SKILL.md".to_string()),
+            }],
+            skills_manifest_href: Some("skills/manifest.json".to_string()),
         };
 
         let markdown = render_summary(&report);
         assert!(markdown.contains("agent_profile: codex"));
         assert!(markdown.contains("## Agent Format"));
         assert!(markdown.contains("- Target agent: Codex"));
+        assert!(markdown.contains("## Technology detection"));
+        assert!(markdown.contains("## Skills from database"));
+        assert!(markdown.contains("Rust Review"));
     }
 
     #[test]
@@ -1873,6 +2766,41 @@ mod tests {
         assert!(history.directory_histories.contains_key("src"));
 
         let output_dir = repo_path.join("history-md");
+        let db_root = unique_temp_path("history-to-md-e2e-skills-db");
+        fs::create_dir_all(db_root.join("rust-review")).expect("skill dir should be created");
+        fs::write(
+            db_root.join("rust-review/SKILL.md"),
+            "# Rust Review\nUse for Rust repos.\n",
+        )
+        .expect("skill file should be written");
+        fs::write(
+            db_root.join("skills.json"),
+            r#"{
+  "skills": [
+    {
+      "id": "rust-review",
+      "title": "Rust Review",
+      "description": "Rust-oriented review heuristics.",
+      "technologies": ["rust"],
+      "source": "rust-review"
+    }
+  ]
+}"#,
+        )
+        .expect("skills db should be written");
+        let skills_result = add_skills_from_database(
+            &SkillsDatabaseConfig {
+                database_path: db_root.join("skills.json"),
+                install_dir: output_dir.join("skills"),
+            },
+            &output_dir,
+            &[DetectedTechnology {
+                id: "rust".to_string(),
+                name: "Rust".to_string(),
+                evidence: vec!["Found `src/main.rs`".to_string()],
+            }],
+        )
+        .expect("skills should be added");
         let report = RepoReport {
             repo_name: "demo".to_string(),
             scanned_commits: history.scanned_commits,
@@ -1880,6 +2808,13 @@ mod tests {
             directory_histories: history.directory_histories,
             tree: build_repo_tree(&repo_path, &output_dir).expect("tree should build"),
             agent_profile: AgentProfile::Codex,
+            detected_technologies: vec![DetectedTechnology {
+                id: "rust".to_string(),
+                name: "Rust".to_string(),
+                evidence: vec!["Found `src/main.rs`".to_string()],
+            }],
+            added_skills: skills_result.added_skills,
+            skills_manifest_href: skills_result.skills_manifest_href,
         };
 
         write_report(&output_dir, &report).expect("report should be written");
@@ -1900,14 +2835,18 @@ mod tests {
         assert!(file_summary.contains("Add CLI by John Roe"));
         assert!(directory_summary.contains("# Folder: src"));
         assert!(html.contains("Markdown profile: Codex"));
+        assert!(html.contains("technologies detected"));
         assert!(html.contains("Repository summary"));
         assert!(
             render_html_viewer(&report)
                 .expect("html should render")
                 .contains("node-details")
         );
+        assert!(output_dir.join("skills/rust-review/SKILL.md").exists());
+        assert!(output_dir.join("skills/manifest.json").exists());
 
         fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+        fs::remove_dir_all(&db_root).expect("skills db dir should be cleaned up");
     }
 
     fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
