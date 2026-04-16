@@ -1,0 +1,26 @@
+{
+  "skills": [
+    {
+      "id": "rust-review",
+      "title": "Rust Review",
+      "description": "Rust-specific review guidance.",
+      "technologies": ["rust"],
+      "source": "example-skills/rust-review"
+    },
+    {
+      "id": "frontend-review",
+      "title": "Frontend Review",
+      "description": "Checks React and TypeScript repos together.",
+      "technologies": ["react", "typescript"],
+      "match_mode": "all",
+      "source": "example-skills/frontend-review"
+    },
+    {
+      "id": "python-review",
+      "title": "Python Review",
+      "description": "Python packaging and tooling guidance.",
+      "technologies": ["python"],
+      "source": "example-skills/python-review"
+    }
+  ]
+}

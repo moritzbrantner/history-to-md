@@ -47,6 +47,28 @@ With the default output location, the tool writes into `/path/to/repository/hist
 
 The selected profile is written into the YAML frontmatter of every generated markdown file and shown in the HTML viewer, so you can tell which markdown shape the output is targeting.
 
+Optional skills database:
+
+```bash
+cargo run -- --agent codex --skills-db ./skills-database.example.json .
+```
+
+Optional custom install destination for matched skills:
+
+```bash
+cargo run -- --skills-db ./skills-database.example.json --skills-dir ~/.codex/skills .
+```
+
+When a skills database is provided, the tool also:
+
+- detects common technologies in the target repository from its live tree
+- matches those detections against the database entries
+- copies matching skill folders or files into the configured skills directory
+- writes a `manifest.json` for the copied skills
+- includes detected technologies and copied skills in `SUMMARY.md` and `index.html`
+
+Built-in technology detection currently recognizes: `docker`, `go`, `java`, `javascript`, `kotlin`, `kubernetes`, `nodejs`, `python`, `react`, `rust`, `terraform`, `typescript`.
+
 ## Examples
 
 Run against the current repository and write into a separate folder:
@@ -92,6 +114,41 @@ history-md/
   SUMMARY.md
   files/
   dirs/
+  skills/          # only when --skills-db is used with the default install dir
 ```
 
 Open `history-md/index.html` in a browser to inspect the project tree and jump into the generated markdown.
+
+## Skills database format
+
+The skills database is a JSON file. Paths in `source` are resolved relative to the database file.
+
+```json
+{
+  "skills": [
+    {
+      "id": "rust-review",
+      "title": "Rust Review",
+      "description": "Rust-specific review guidance.",
+      "technologies": ["rust"],
+      "source": "skills/rust-review"
+    },
+    {
+      "id": "frontend-review",
+      "title": "Frontend Review",
+      "description": "Checks for React and TypeScript projects.",
+      "technologies": ["react", "typescript"],
+      "match_mode": "all",
+      "source": "skills/frontend-review",
+      "install_as": "frontend-review"
+    }
+  ]
+}
+```
+
+Field notes:
+
+- `technologies` is matched against the built-in detector ids.
+- `match_mode` is optional and defaults to `any`. Use `all` when every listed technology must be present.
+- `source` can point to either a file or a directory. Directory entries usually contain a `SKILL.md`.
+- `install_as` is optional and defaults to the skill `id`.
