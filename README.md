@@ -1,89 +1,183 @@
 # history-to-md
 
-Rust CLI that turns a repository's git history into markdown summaries and a browsable HTML viewer.
+Rust CLI that turns a repository's git history into markdown summaries, a browsable HTML viewer, and a machine-readable JSON report.
 
-## What it generates
+## Install
 
-For a target repository, the binary now:
+Build locally:
 
-- reads `git log --numstat`
-- aggregates commit count, churn, authors, and recent commits per file
-- aggregates the same history per folder
-- walks the live repository tree so unchanged files and folders still appear in the UI
-- writes `SUMMARY.md`
-- writes one markdown file per changed file under `files/`
-- writes one markdown file per changed folder under `dirs/`
-- writes `index.html`, a self-contained viewer over the project structure
-- tags each markdown file with the selected agent profile and a small markdown format contract
+```bash
+cargo build --release
+```
 
-The HTML viewer lets you click a folder or file and see:
-
-- the repo structure
-- relevant generated markdown reports for that node
-- the full commit history that touched that folder or file
-- churn and primary author information
-
-## Usage
+Run without installing:
 
 ```bash
 cargo run -- /path/to/repository
 ```
 
-Optional output directory:
+Install from the current checkout:
 
 ```bash
-cargo run -- /path/to/repository /path/to/output
+cargo install --path .
 ```
 
-Optional agent profile:
+## Compatibility
+
+- Supported interface: CLI only
+- Runtime dependencies: `git` must be available on `PATH`
+- Platform target: developed and tested on Linux; release builds are produced for Linux, macOS, and Windows
+- Input model: local git repositories only; no network services are required
+
+## Project Policy
+
+- `H2M-DECISION: prioritize the CLI as the only supported public interface`
+- `H2M-DECISION: keep library internals unstable and free to refactor`
+- `H2M-TOOLING: require cargo fmt --check, cargo test, and cargo clippy --all-targets --all-features -- -D warnings`
+- `H2M-BREAKING: document any non-additive CLI or output contract changes with an explicit H2M marker`
+
+## What It Generates
+
+For a target repository, the binary can:
+
+- read `git log --numstat`
+- aggregate commit count, churn, authors, and recent commits per file
+- aggregate the same history per folder
+- walk the live repository tree so unchanged files and folders still appear in the UI
+- write `SUMMARY.md`
+- write one markdown file per changed file under `files/`
+- write one markdown file per changed folder under `dirs/`
+- write `index.html`, a self-contained viewer over the project structure
+- write `report.json`, a machine-readable report bundle
+- tag every markdown file with the selected agent profile and a small markdown format contract
+- optionally detect technologies and install matching skills from a skills database
+
+The HTML viewer lets you inspect:
+
+- the repo structure
+- generated reports for a node
+- the full commit history that touched that folder or file
+- churn and primary author information
+- detected technologies and copied skills at the repository root
+
+## Usage
+
+Basic invocation:
 
 ```bash
-cargo run -- --agent codex /path/to/repository
+history-to-md /path/to/repository
 ```
 
-Supported agent profiles: `generic`, `codex`, `claude`, `cursor`, `aider`.
+Custom output directory:
+
+```bash
+history-to-md /path/to/repository /path/to/output
+```
+
+Agent profile:
+
+```bash
+history-to-md --agent codex /path/to/repository
+```
+
+History window and path filters:
+
+```bash
+history-to-md \
+  --since 2026-01-01 \
+  --until 2026-03-31 \
+  --max-commits 200 \
+  --include 'src/**' \
+  --exclude 'src/generated/**' \
+  /path/to/repository
+```
+
+Select generated artifacts:
+
+```bash
+history-to-md --formats md,json /path/to/repository
+```
+
+Skills database:
+
+```bash
+history-to-md --agent codex --skills-db ./skills-database.example.json .
+```
+
+Custom skills install destination:
+
+```bash
+history-to-md \
+  --skills-db ./skills-database.example.json \
+  --skills-dir ~/.codex/skills \
+  .
+```
 
 With the default output location, the tool writes into `/path/to/repository/history-md`.
 
-The selected profile is written into the YAML frontmatter of every generated markdown file and shown in the HTML viewer, so you can tell which markdown shape the output is targeting.
+Supported agent profiles: `generic`, `codex`, `claude`, `cursor`, `aider`.
 
-Optional skills database:
+Supported output formats: `md`, `html`, `json`.
 
-```bash
-cargo run -- --agent codex --skills-db ./skills-database.example.json .
+## CLI Reference
+
+```text
+history-to-md
+  [--agent <generic|codex|claude|cursor|aider>]
+  [--skills-db <path>]
+  [--skills-dir <path>]
+  [--since <YYYY-MM-DD>]
+  [--until <YYYY-MM-DD>]
+  [--max-commits <N>]
+  [--include <glob>]...
+  [--exclude <glob>]...
+  [--formats <md,html,json>]
+  <repo-path>
+  [output-dir]
 ```
 
-Optional custom install destination for matched skills:
+Flag notes:
 
-```bash
-cargo run -- --skills-db ./skills-database.example.json --skills-dir ~/.codex/skills .
+- `--since`, `--until`: limit the git log window
+- `--max-commits`: cap the number of scanned commits
+- `--include`: repeatable glob filter for included repo-relative paths
+- `--exclude`: repeatable glob filter for excluded repo-relative paths
+- `--formats`: comma-separated artifact selection; default is `md,html,json`
+- `--skills-dir`: only valid when `--skills-db` is also provided
+
+## Output Layout
+
+```text
+history-md/
+  index.html
+  report.json
+  SUMMARY.md
+  files/
+  dirs/
+  skills/          # only when --skills-db is used with the default install dir
 ```
 
-When a skills database is provided, the tool also:
+Open `history-md/index.html` in a browser to inspect the project tree and jump into generated reports.
 
-- detects common technologies in the target repository from its live tree
-- matches those detections against the database entries
-- copies matching skill folders or files into the configured skills directory
-- writes a `manifest.json` for the copied skills
-- includes detected technologies and copied skills in `SUMMARY.md` and `index.html`
+## Output Contract
 
-Built-in technology detection currently recognizes: `docker`, `go`, `java`, `javascript`, `kotlin`, `kubernetes`, `nodejs`, `python`, `react`, `rust`, `terraform`, `typescript`.
+`report.json` schema version `1` includes these top-level fields:
 
-## Examples
+- `generated_by`
+- `format_version`
+- `repo_name`
+- `agent_profile`
+- `agent_display_name`
+- `scanned_commits`
+- `detected_technologies`
+- `added_skills`
+- `skills_manifest_href`
+- `tree`
+- `file_histories`
+- `directory_histories`
+- `available_formats`
 
-Run against the current repository and write into a separate folder:
-
-```bash
-cargo run -- --agent codex . ./tmp/history-md
-```
-
-Generate into the repository default output folder with the generic profile:
-
-```bash
-cargo run -- .
-```
-
-Generated markdown starts with YAML frontmatter plus an agent-format contract. A file summary looks like:
+Markdown output includes YAML frontmatter plus an agent-format contract. A file summary starts like:
 
 ```md
 ---
@@ -96,30 +190,16 @@ repo_name: 'history-to-md'
 title: 'src/main.rs'
 path: 'src/main.rs'
 ---
-
-# src/main.rs
-
-## Agent Format
-
-- Target agent: Codex
-- Markdown style: Direct engineering-oriented sections, flat bullets, and code identifiers kept in backticks.
-- Usage hint: Use when the reader is a coding agent that prefers terse, operational context.
 ```
 
-## Output layout
+## Versioning Policy
 
-```text
-history-md/
-  index.html
-  SUMMARY.md
-  files/
-  dirs/
-  skills/          # only when --skills-db is used with the default install dir
-```
+- New CLI flags should be additive by default.
+- New `report.json` fields should be additive by default.
+- If a change can break automation or downstream parsing, record it with an `H2M-BREAKING:` marker.
+- If users need follow-up steps, record them with an `H2M-MIGRATION:` marker.
 
-Open `history-md/index.html` in a browser to inspect the project tree and jump into the generated markdown.
-
-## Skills database format
+## Skills Database Format
 
 The skills database is a JSON file. Paths in `source` are resolved relative to the database file.
 
@@ -148,7 +228,24 @@ The skills database is a JSON file. Paths in `source` are resolved relative to t
 
 Field notes:
 
-- `technologies` is matched against the built-in detector ids.
-- `match_mode` is optional and defaults to `any`. Use `all` when every listed technology must be present.
-- `source` can point to either a file or a directory. Directory entries usually contain a `SKILL.md`.
-- `install_as` is optional and defaults to the skill `id`.
+- `technologies` is matched against the built-in detector ids
+- `match_mode` is optional and defaults to `any`
+- `source` can point to either a file or a directory
+- `install_as` is optional and defaults to the skill `id`
+
+## Built-In Technology Detection
+
+Current built-in detections:
+
+- `docker`
+- `go`
+- `java`
+- `javascript`
+- `kotlin`
+- `kubernetes`
+- `nodejs`
+- `python`
+- `react`
+- `rust`
+- `terraform`
+- `typescript`
