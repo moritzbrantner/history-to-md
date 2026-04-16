@@ -1,0 +1,265 @@
+{
+  "generated_by": "history-to-md",
+  "format_version": 1,
+  "repo_name": "repo",
+  "agent_profile": "codex",
+  "agent_display_name": "Codex",
+  "scanned_commits": 2,
+  "detected_technologies": [
+    {
+      "id": "rust",
+      "name": "Rust",
+      "evidence": [
+        "Found `Cargo.toml`",
+        "Found `src/utils/mod.rs`"
+      ]
+    }
+  ],
+  "added_skills": [],
+  "skills_manifest_href": null,
+  "tree": {
+    "path": "",
+    "name": "repo",
+    "is_dir": true,
+    "children": [
+      {
+        "path": "src",
+        "name": "src",
+        "is_dir": true,
+        "children": [
+          {
+            "path": "src/utils",
+            "name": "utils",
+            "is_dir": true,
+            "children": [
+              {
+                "path": "src/utils/mod.rs",
+                "name": "mod.rs",
+                "is_dir": false,
+                "children": []
+              }
+            ]
+          },
+          {
+            "path": "src/main.rs",
+            "name": "main.rs",
+            "is_dir": false,
+            "children": []
+          }
+        ]
+      },
+      {
+        "path": "Cargo.toml",
+        "name": "Cargo.toml",
+        "is_dir": false,
+        "children": []
+      },
+      {
+        "path": "README.md",
+        "name": "README.md",
+        "is_dir": false,
+        "children": []
+      }
+    ]
+  },
+  "file_histories": [
+    {
+      "path": "src/main.rs",
+      "commit_count": 2,
+      "total_added": 8,
+      "total_deleted": 1,
+      "authors": {
+        "Fixture User": 1,
+        "Jane Doe": 1
+      },
+      "commits": [
+        {
+          "commit": {
+            "hash": "020592c31c2b92e75c02dee90c5944846120e91f",
+            "date": "2026-02-03",
+            "author": "Jane Doe",
+            "subject": "Add helper module"
+          },
+          "added": 5,
+          "deleted": 1
+        },
+        {
+          "commit": {
+            "hash": "e5e4bdbf2c03f27514254ca5397251e0f8f6d391",
+            "date": "2026-01-02",
+            "author": "Fixture User",
+            "subject": "Initial fixture import"
+          },
+          "added": 3,
+          "deleted": 0
+        }
+      ]
+    },
+    {
+      "path": "README.md",
+      "commit_count": 2,
+      "total_added": 5,
+      "total_deleted": 0,
+      "authors": {
+        "Fixture User": 1,
+        "Jane Doe": 1
+      },
+      "commits": [
+        {
+          "commit": {
+            "hash": "020592c31c2b92e75c02dee90c5944846120e91f",
+            "date": "2026-02-03",
+            "author": "Jane Doe",
+            "subject": "Add helper module"
+          },
+          "added": 2,
+          "deleted": 0
+        },
+        {
+          "commit": {
+            "hash": "e5e4bdbf2c03f27514254ca5397251e0f8f6d391",
+            "date": "2026-01-02",
+            "author": "Fixture User",
+            "subject": "Initial fixture import"
+          },
+          "added": 3,
+          "deleted": 0
+        }
+      ]
+    },
+    {
+      "path": "Cargo.toml",
+      "commit_count": 1,
+      "total_added": 4,
+      "total_deleted": 0,
+      "authors": {
+        "Fixture User": 1
+      },
+      "commits": [
+        {
+          "commit": {
+            "hash": "e5e4bdbf2c03f27514254ca5397251e0f8f6d391",
+            "date": "2026-01-02",
+            "author": "Fixture User",
+            "subject": "Initial fixture import"
+          },
+          "added": 4,
+          "deleted": 0
+        }
+      ]
+    },
+    {
+      "path": "src/utils/mod.rs",
+      "commit_count": 1,
+      "total_added": 1,
+      "total_deleted": 0,
+      "authors": {
+        "Jane Doe": 1
+      },
+      "commits": [
+        {
+          "commit": {
+            "hash": "020592c31c2b92e75c02dee90c5944846120e91f",
+            "date": "2026-02-03",
+            "author": "Jane Doe",
+            "subject": "Add helper module"
+          },
+          "added": 1,
+          "deleted": 0
+        }
+      ]
+    }
+  ],
+  "directory_histories": [
+    {
+      "path": "",
+      "commit_count": 2,
+      "total_added": 18,
+      "total_deleted": 1,
+      "authors": {
+        "Fixture User": 1,
+        "Jane Doe": 1
+      },
+      "commits": [
+        {
+          "commit": {
+            "hash": "020592c31c2b92e75c02dee90c5944846120e91f",
+            "date": "2026-02-03",
+            "author": "Jane Doe",
+            "subject": "Add helper module"
+          },
+          "added": 8,
+          "deleted": 1
+        },
+        {
+          "commit": {
+            "hash": "e5e4bdbf2c03f27514254ca5397251e0f8f6d391",
+            "date": "2026-01-02",
+            "author": "Fixture User",
+            "subject": "Initial fixture import"
+          },
+          "added": 10,
+          "deleted": 0
+        }
+      ]
+    },
+    {
+      "path": "src",
+      "commit_count": 2,
+      "total_added": 9,
+      "total_deleted": 1,
+      "authors": {
+        "Fixture User": 1,
+        "Jane Doe": 1
+      },
+      "commits": [
+        {
+          "commit": {
+            "hash": "020592c31c2b92e75c02dee90c5944846120e91f",
+            "date": "2026-02-03",
+            "author": "Jane Doe",
+            "subject": "Add helper module"
+          },
+          "added": 6,
+          "deleted": 1
+        },
+        {
+          "commit": {
+            "hash": "e5e4bdbf2c03f27514254ca5397251e0f8f6d391",
+            "date": "2026-01-02",
+            "author": "Fixture User",
+            "subject": "Initial fixture import"
+          },
+          "added": 3,
+          "deleted": 0
+        }
+      ]
+    },
+    {
+      "path": "src/utils",
+      "commit_count": 1,
+      "total_added": 1,
+      "total_deleted": 0,
+      "authors": {
+        "Jane Doe": 1
+      },
+      "commits": [
+        {
+          "commit": {
+            "hash": "020592c31c2b92e75c02dee90c5944846120e91f",
+            "date": "2026-02-03",
+            "author": "Jane Doe",
+            "subject": "Add helper module"
+          },
+          "added": 1,
+          "deleted": 0
+        }
+      ]
+    }
+  ],
+  "available_formats": [
+    "md",
+    "html",
+    "json"
+  ]
+}
