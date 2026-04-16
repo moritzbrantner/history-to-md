@@ -2386,14 +2386,16 @@ renderNode("");
 #[cfg(test)]
 mod tests {
     use super::{
-        AddedSkill, AgentProfile, CommitMeta, Config, DetectedTechnology, HistoryAccumulator,
-        RepoReport, SkillsDatabaseConfig, TreeNode, add_skills_from_database, ancestor_directories,
+        AddedSkill, AgentProfile, CommitMeta, Config, DetectedTechnology, FileCommit,
+        HistoryAccumulator, PathHistory, RepoReport, SkillMatchMode, SkillsDatabaseConfig,
+        SkillsDatabaseEntry, TreeNode, add_skills_from_database, ancestor_directories,
         build_repo_tree, collect_history, detect_technologies, directory_markdown_path,
-        directory_summary_link, markdown_path, parse_commit_meta, parse_numstat_line,
-        render_html_viewer, render_summary, serialize_for_html, specific_directory_chain,
-        summary_link, write_report,
+        directory_summary_link, markdown_path, matched_technology_ids, parse_commit_meta,
+        parse_numstat_line, preferred_skill_link_target, relative_href, relevant_report_links,
+        render_file_summary, render_html_viewer, render_summary, serialize_for_html,
+        specific_directory_chain, summary_link, top_authors, write_report, yaml_string,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -2415,6 +2417,21 @@ mod tests {
         assert_eq!(change.0, 12);
         assert_eq!(change.1, 4);
         assert_eq!(change.2, "src/main.rs");
+    }
+
+    #[test]
+    fn parses_binary_numstat_lines_as_zero_churn() {
+        let change = parse_numstat_line("-\t-\tassets/logo.png").expect("numstat should parse");
+        assert_eq!(change.0, 0);
+        assert_eq!(change.1, 0);
+        assert_eq!(change.2, "assets/logo.png");
+    }
+
+    #[test]
+    fn rejects_commit_metadata_without_subject() {
+        let error = parse_commit_meta("abc123\u{1f}2026-04-16\u{1f}Jane Doe")
+            .expect_err("commit metadata should fail without subject");
+        assert_eq!(error, "missing commit subject in git log output");
     }
 
     #[test]
@@ -2542,6 +2559,75 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_unknown_option() {
+        let repo_path = unique_temp_path("history-to-md-config-unknown-option");
+        fs::create_dir_all(&repo_path).expect("temp repo path should be created");
+
+        let args = vec![
+            "history-to-md".to_string(),
+            "--wat".to_string(),
+            repo_path.display().to_string(),
+        ];
+        let error = match Config::from_args(&args) {
+            Ok(_) => panic!("config should reject unknown options"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("unknown option: --wat"));
+        assert!(error.contains("usage: history-to-md"));
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
+    fn config_requires_skills_database_when_skills_dir_is_provided() {
+        let repo_path = unique_temp_path("history-to-md-config-skills-dir");
+        fs::create_dir_all(&repo_path).expect("temp repo path should be created");
+
+        let args = vec![
+            "history-to-md".to_string(),
+            "--skills-dir".to_string(),
+            repo_path.join(".codex/skills").display().to_string(),
+            repo_path.display().to_string(),
+        ];
+        let error = match Config::from_args(&args) {
+            Ok(_) => panic!("config should reject orphan skills dir"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("--skills-dir requires --skills-db"));
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
+    fn config_rejects_missing_skills_database_path() {
+        let repo_path = unique_temp_path("history-to-md-config-missing-skills-db");
+        fs::create_dir_all(&repo_path).expect("temp repo path should be created");
+        let missing_database = repo_path.join("missing.json");
+
+        let args = vec![
+            "history-to-md".to_string(),
+            "--skills-db".to_string(),
+            missing_database.display().to_string(),
+            repo_path.display().to_string(),
+        ];
+        let error = match Config::from_args(&args) {
+            Ok(_) => panic!("config should reject missing database"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains(&format!(
+                "skills database path does not exist: {}",
+                missing_database.display()
+            ))
+        );
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
     fn rejects_unknown_agent_profile() {
         let error = AgentProfile::parse("unknown").expect_err("agent parsing should fail");
         assert!(error.contains("supported agent profiles: generic, codex, claude, cursor, aider"));
@@ -2585,6 +2671,66 @@ mod tests {
         assert!(names.contains(&"Docker"));
 
         fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
+    fn detects_react_from_package_json_content_without_component_files() {
+        let repo_path = unique_temp_path("history-to-md-react-detect-test");
+        fs::create_dir_all(&repo_path).expect("temp repo path should be created");
+        fs::write(
+            repo_path.join("package.json"),
+            "{\n  \"dependencies\": { \"react\": \"18.0.0\" }\n}\n",
+        )
+        .expect("package json should be written");
+
+        let tree = build_repo_tree(&repo_path, &repo_path.join("history-md"))
+            .expect("tree should build successfully");
+        let technologies =
+            detect_technologies(&repo_path, &tree).expect("technologies should detect");
+
+        let react = technologies
+            .iter()
+            .find(|technology| technology.id == "react")
+            .expect("react should be detected");
+        assert_eq!(
+            react.evidence,
+            vec!["Found `package.json` containing `\"react\"`".to_string()]
+        );
+        assert_eq!(
+            technologies
+                .iter()
+                .map(|technology| technology.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["JavaScript", "Node.js", "React"]
+        );
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
+    fn matches_skill_technologies_for_any_and_all_modes() {
+        let detected_one = HashSet::from(["rust"]);
+        let detected_two = HashSet::from(["rust", "typescript"]);
+        let any_skill = SkillsDatabaseEntry {
+            id: "polyglot".to_string(),
+            title: "Polyglot".to_string(),
+            description: "Matches any configured technology.".to_string(),
+            technologies: vec!["rust".to_string(), "typescript".to_string()],
+            match_mode: SkillMatchMode::Any,
+            source: Some("polyglot".to_string()),
+            install_as: None,
+        };
+        let all_skill = SkillsDatabaseEntry {
+            match_mode: SkillMatchMode::All,
+            ..any_skill.clone()
+        };
+
+        assert_eq!(matched_technology_ids(&any_skill, &detected_one), vec!["rust"]);
+        assert!(matched_technology_ids(&all_skill, &detected_one).is_empty());
+        assert_eq!(
+            matched_technology_ids(&all_skill, &detected_two),
+            vec!["rust", "typescript"]
+        );
     }
 
     #[test]
@@ -2672,6 +2818,114 @@ mod tests {
     }
 
     #[test]
+    fn skips_unmatched_skills_without_a_source_path() {
+        let repo_path = unique_temp_path("history-to-md-skills-unmatched-test");
+        let output_dir = repo_path.join("history-md");
+        let db_root = unique_temp_path("history-to-md-skills-db-unmatched");
+        let install_dir = output_dir.join("skills");
+        fs::create_dir_all(db_root.join("rust-review")).expect("skill dir should exist");
+        fs::write(
+            db_root.join("rust-review/SKILL.md"),
+            "# Rust Review\nUse for Rust repos.\n",
+        )
+        .expect("rust skill should be written");
+        fs::write(
+            db_root.join("skills.json"),
+            r#"{
+  "skills": [
+    {
+      "id": "rust-review",
+      "title": "Rust Review",
+      "description": "Rust-oriented review heuristics.",
+      "technologies": ["rust"],
+      "source": "rust-review"
+    },
+    {
+      "id": "go-review",
+      "title": "Go Review",
+      "description": "Go heuristics.",
+      "technologies": ["go"]
+    }
+  ]
+}"#,
+        )
+        .expect("skills db should be written");
+
+        let skills = add_skills_from_database(
+            &SkillsDatabaseConfig {
+                database_path: db_root.join("skills.json"),
+                install_dir: install_dir.clone(),
+            },
+            &output_dir,
+            &[DetectedTechnology {
+                id: "rust".to_string(),
+                name: "Rust".to_string(),
+                evidence: vec!["Found `Cargo.toml`".to_string()],
+            }],
+        )
+        .expect("matched skills should be added");
+
+        assert_eq!(skills.added_skills.len(), 1);
+        assert_eq!(skills.added_skills[0].id, "rust-review");
+        assert!(install_dir.join("rust-review/SKILL.md").exists());
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+        fs::remove_dir_all(&db_root).expect("skills db dir should be cleaned up");
+    }
+
+    #[test]
+    fn falls_back_to_skill_id_when_install_as_is_blank() {
+        let repo_path = unique_temp_path("history-to-md-skills-install-name-test");
+        let output_dir = repo_path.join("history-md");
+        let db_root = unique_temp_path("history-to-md-skills-db-install-name");
+        let install_dir = output_dir.join("skills");
+        fs::create_dir_all(&db_root).expect("skills db dir should exist");
+        fs::write(
+            db_root.join("rust-review.md"),
+            "# Rust Review\nUse for Rust repos.\n",
+        )
+        .expect("skill file should be written");
+        fs::write(
+            db_root.join("skills.json"),
+            r#"{
+  "skills": [
+    {
+      "id": "rust-review",
+      "title": "Rust Review",
+      "description": "Rust-oriented review heuristics.",
+      "technologies": ["rust"],
+      "source": "rust-review.md",
+      "install_as": "   "
+    }
+  ]
+}"#,
+        )
+        .expect("skills db should be written");
+
+        let skills = add_skills_from_database(
+            &SkillsDatabaseConfig {
+                database_path: db_root.join("skills.json"),
+                install_dir: install_dir.clone(),
+            },
+            &output_dir,
+            &[DetectedTechnology {
+                id: "rust".to_string(),
+                name: "Rust".to_string(),
+                evidence: vec!["Found `Cargo.toml`".to_string()],
+            }],
+        )
+        .expect("skill should be added");
+
+        assert_eq!(skills.added_skills.len(), 1);
+        assert_eq!(skills.added_skills[0].location, install_dir.join("rust-review").display().to_string());
+        assert_eq!(skills.added_skills[0].href.as_deref(), Some("skills/rust-review"));
+        assert!(install_dir.join("rust-review").is_file());
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+        fs::remove_dir_all(&db_root).expect("skills db dir should be cleaned up");
+    }
+
+    #[test]
     fn summary_includes_agent_frontmatter() {
         let report = RepoReport {
             repo_name: "demo".to_string(),
@@ -2711,6 +2965,19 @@ mod tests {
     }
 
     #[test]
+    fn summary_renders_empty_detection_and_skills_states() {
+        let mut report = sample_report();
+        report.added_skills.clear();
+        report.skills_manifest_href = None;
+
+        let markdown = render_summary(&report);
+        assert!(markdown.contains("- Detected technologies: none"));
+        assert!(markdown.contains("- Added skills: none"));
+        assert!(markdown.contains("- No technologies detected."));
+        assert!(markdown.contains("- No matching skills were added from a skills database."));
+    }
+
+    #[test]
     fn repo_tree_skips_git_and_generated_output() {
         let repo_path = unique_temp_path("history-to-md-tree-test");
         fs::create_dir_all(repo_path.join(".git")).expect("git dir should exist");
@@ -2737,10 +3004,146 @@ mod tests {
     }
 
     #[test]
+    fn repo_tree_sorts_directories_before_files_case_insensitively() {
+        let repo_path = unique_temp_path("history-to-md-tree-sort-test");
+        fs::create_dir_all(repo_path.join("Zoo")).expect("Zoo dir should exist");
+        fs::create_dir_all(repo_path.join("alpha")).expect("alpha dir should exist");
+        fs::write(repo_path.join("beta.txt"), "beta\n").expect("beta file should exist");
+        fs::write(repo_path.join("Gamma.txt"), "gamma\n").expect("gamma file should exist");
+
+        let tree = build_repo_tree(&repo_path, &repo_path.join("history-md"))
+            .expect("tree should build successfully");
+        let child_names = tree
+            .children
+            .iter()
+            .map(|child| child.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(child_names, vec!["alpha", "Zoo", "beta.txt", "Gamma.txt"]);
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
     fn html_serialization_escapes_script_terminators() {
         let serialized =
             serialize_for_html(&vec!["</script>".to_string()]).expect("json should serialize");
         assert!(serialized.contains("<\\/script>"));
+    }
+
+    #[test]
+    fn preferred_skill_link_target_uses_skill_markdown_for_directories() {
+        let skill_dir = unique_temp_path("history-to-md-skill-link-target");
+        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        fs::write(skill_dir.join("SKILL.md"), "# Skill\n").expect("skill markdown should exist");
+
+        assert_eq!(
+            preferred_skill_link_target(&skill_dir, true),
+            skill_dir.join("SKILL.md")
+        );
+        assert_eq!(
+            preferred_skill_link_target(&skill_dir.join("SKILL.md"), false),
+            skill_dir.join("SKILL.md")
+        );
+
+        fs::remove_dir_all(&skill_dir).expect("temp skill dir should be cleaned up");
+    }
+
+    #[test]
+    fn relative_href_only_links_paths_inside_output_directory() {
+        let output_dir = Path::new("/tmp/history-md-output");
+        assert_eq!(
+            relative_href(output_dir, &output_dir.join("skills/manifest.json")).as_deref(),
+            Some("skills/manifest.json")
+        );
+        assert_eq!(relative_href(output_dir, Path::new("/tmp/elsewhere/file.txt")), None);
+    }
+
+    #[test]
+    fn file_summary_limits_commit_preview() {
+        let report = sample_report();
+        let commits = (0..15)
+            .map(|index| FileCommit {
+                commit: CommitMeta {
+                    hash: format!("abcdef{index:02}"),
+                    date: "2026-04-16".to_string(),
+                    author: "Jane Doe".to_string(),
+                    subject: format!("Commit {index:02}"),
+                },
+                added: index + 1,
+                deleted: index,
+            })
+            .collect::<Vec<_>>();
+        let file = PathHistory {
+            path: "src/main.rs".to_string(),
+            commit_count: commits.len() as u64,
+            total_added: commits.iter().map(|commit| commit.added).sum(),
+            total_deleted: commits.iter().map(|commit| commit.deleted).sum(),
+            authors: HashMap::from([("Jane Doe".to_string(), commits.len() as u64)]),
+            commits,
+        };
+
+        let markdown = render_file_summary(&report, &file);
+        assert!(markdown.contains("Commit 00"));
+        assert!(markdown.contains("Commit 11"));
+        assert!(!markdown.contains("Commit 12"));
+        assert!(!markdown.contains("Commit 14"));
+    }
+
+    #[test]
+    fn top_authors_orders_ties_alphabetically() {
+        let history = PathHistory {
+            path: "src/main.rs".to_string(),
+            commit_count: 4,
+            total_added: 10,
+            total_deleted: 2,
+            authors: HashMap::from([
+                ("Zoe".to_string(), 2),
+                ("Amy".to_string(), 2),
+                ("Bob".to_string(), 1),
+            ]),
+            commits: Vec::new(),
+        };
+
+        assert_eq!(top_authors(&history, 2), "Amy (2), Zoe (2)");
+        assert_eq!(top_authors(&history, 5), "Amy (2), Zoe (2), Bob (1)");
+    }
+
+    #[test]
+    fn relevant_report_links_include_manifest_and_parent_folder_history() {
+        let report = sample_report();
+        let root_links = relevant_report_links(&report.tree, &report);
+        let file_links = relevant_report_links(&report.tree.children[0].children[0], &report);
+
+        assert_eq!(root_links[0].label, "Skills manifest");
+        assert_eq!(root_links[0].href, "skills/manifest.json");
+        assert_eq!(
+            file_links
+                .iter()
+                .map(|link| (link.label.as_str(), link.href.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("File history", "files/src/main.rs.md"),
+                ("Folder history: src", "dirs/src/INDEX.md"),
+                ("Repository summary", "SUMMARY.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn yaml_strings_escape_single_quotes() {
+        assert_eq!(yaml_string("O'Brien"), "'O''Brien'");
+    }
+
+    #[test]
+    fn collect_history_rejects_non_git_directories() {
+        let repo_path = unique_temp_path("history-to-md-not-a-repo");
+        fs::create_dir_all(&repo_path).expect("temp repo path should be created");
+
+        let error = collect_history(&repo_path).expect_err("history collection should fail");
+        assert!(error.contains("not a git repository"));
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
     }
 
     #[test]
@@ -2902,5 +3305,77 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn sample_report() -> RepoReport {
+        let mut directory_histories = HashMap::new();
+        directory_histories.insert(
+            String::new(),
+            sample_history("", &[("root0001", "Jane Doe", "Initial import", 5, 1)]),
+        );
+        directory_histories.insert(
+            "src".to_string(),
+            sample_history("src", &[("src00001", "Jane Doe", "Touch src", 3, 1)]),
+        );
+
+        let mut file_histories = HashMap::new();
+        file_histories.insert(
+            "src/main.rs".to_string(),
+            sample_history(
+                "src/main.rs",
+                &[("file0001", "Jane Doe", "Touch src", 3, 1)],
+            ),
+        );
+
+        RepoReport {
+            repo_name: "demo".to_string(),
+            scanned_commits: 3,
+            file_histories,
+            directory_histories,
+            tree: TreeNode {
+                path: String::new(),
+                name: "demo".to_string(),
+                is_dir: true,
+                children: vec![TreeNode {
+                    path: "src".to_string(),
+                    name: "src".to_string(),
+                    is_dir: true,
+                    children: vec![TreeNode {
+                        path: "src/main.rs".to_string(),
+                        name: "main.rs".to_string(),
+                        is_dir: false,
+                        children: Vec::new(),
+                    }],
+                }],
+            },
+            agent_profile: AgentProfile::Codex,
+            detected_technologies: Vec::new(),
+            added_skills: vec![AddedSkill {
+                id: "rust-review".to_string(),
+                title: "Rust Review".to_string(),
+                description: "Rust-oriented review heuristics.".to_string(),
+                matched_technologies: vec!["Rust".to_string()],
+                location: "/tmp/demo/history-md/skills/rust-review/SKILL.md".to_string(),
+                href: Some("skills/rust-review/SKILL.md".to_string()),
+            }],
+            skills_manifest_href: Some("skills/manifest.json".to_string()),
+        }
+    }
+
+    fn sample_history(path: &str, commits: &[(&str, &str, &str, u64, u64)]) -> PathHistory {
+        let mut history = HistoryAccumulator::new(path.to_string());
+        for (hash, author, subject, added, deleted) in commits {
+            history.record_change(
+                &CommitMeta {
+                    hash: (*hash).to_string(),
+                    date: "2026-04-16".to_string(),
+                    author: (*author).to_string(),
+                    subject: (*subject).to_string(),
+                },
+                *added,
+                *deleted,
+            );
+        }
+        history.into_history()
     }
 }
