@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const DEFAULT_OUTPUT_DIR: &str = "history-md";
-const RECENT_COMMITS_PER_NODE: usize = 12;
+const MARKDOWN_COMMITS_PER_NODE: usize = 12;
 const SUMMARY_FILE_COUNT: usize = 20;
 const SUMMARY_DIRECTORY_COUNT: usize = 15;
 
@@ -98,7 +98,7 @@ struct PathHistory {
     total_added: u64,
     total_deleted: u64,
     authors: HashMap<String, u64>,
-    recent_commits: Vec<FileCommit>,
+    commits: Vec<FileCommit>,
 }
 
 #[derive(Debug, Default)]
@@ -108,8 +108,8 @@ struct HistoryAccumulator {
     total_added: u64,
     total_deleted: u64,
     authors: HashMap<String, u64>,
-    recent_commits: Vec<FileCommit>,
-    seen_commits: HashSet<String>,
+    commits: Vec<FileCommit>,
+    commit_indices: HashMap<String, usize>,
 }
 
 impl HistoryAccumulator {
@@ -124,28 +124,23 @@ impl HistoryAccumulator {
         self.total_added += added;
         self.total_deleted += deleted;
 
-        if self.seen_commits.insert(commit.hash.clone()) {
-            self.commit_count += 1;
-            *self.authors.entry(commit.author.clone()).or_insert(0) += 1;
-
-            if self.recent_commits.len() < RECENT_COMMITS_PER_NODE {
-                self.recent_commits.push(FileCommit {
-                    commit: commit.clone(),
-                    added,
-                    deleted,
-                });
+        if let Some(index) = self.commit_indices.get(&commit.hash).copied() {
+            if let Some(existing) = self.commits.get_mut(index) {
+                existing.added += added;
+                existing.deleted += deleted;
             }
             return;
         }
 
-        if let Some(existing) = self
-            .recent_commits
-            .iter_mut()
-            .find(|existing| existing.commit.hash == commit.hash)
-        {
-            existing.added += added;
-            existing.deleted += deleted;
-        }
+        let index = self.commits.len();
+        self.commit_indices.insert(commit.hash.clone(), index);
+        self.commits.push(FileCommit {
+            commit: commit.clone(),
+            added,
+            deleted,
+        });
+        self.commit_count += 1;
+        *self.authors.entry(commit.author.clone()).or_insert(0) += 1;
     }
 
     fn into_history(self) -> PathHistory {
@@ -155,9 +150,13 @@ impl HistoryAccumulator {
             total_added: self.total_added,
             total_deleted: self.total_deleted,
             authors: self.authors,
-            recent_commits: self.recent_commits,
+            commits: self.commits,
         }
     }
+}
+
+fn commit_preview(history: &PathHistory) -> impl Iterator<Item = &FileCommit> {
+    history.commits.iter().take(MARKDOWN_COMMITS_PER_NODE)
 }
 
 #[derive(Debug, Default)]
@@ -203,7 +202,7 @@ struct NodeView {
     total_deleted: u64,
     primary_authors: String,
     report_links: Vec<ReportLink>,
-    recent_commits: Vec<FileCommit>,
+    commits: Vec<FileCommit>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -602,7 +601,7 @@ fn render_file_summary(file: &PathHistory) -> String {
     )
     .unwrap();
     writeln!(&mut markdown, "- Primary authors: {}", top_authors(file, 5)).unwrap();
-    if let Some(commit) = file.recent_commits.first() {
+    if let Some(commit) = file.commits.first() {
         writeln!(
             &mut markdown,
             "- Latest change: {} by {} ({})",
@@ -611,10 +610,15 @@ fn render_file_summary(file: &PathHistory) -> String {
         .unwrap();
     }
     writeln!(&mut markdown).unwrap();
-    writeln!(&mut markdown, "## Recent commits").unwrap();
+    writeln!(
+        &mut markdown,
+        "## Recent commits (showing up to {})",
+        MARKDOWN_COMMITS_PER_NODE
+    )
+    .unwrap();
     writeln!(&mut markdown).unwrap();
 
-    for commit in &file.recent_commits {
+    for commit in commit_preview(file) {
         writeln!(
             &mut markdown,
             "- `{}` {} by {} on {} (`+{}` / `-{}`)",
@@ -648,7 +652,7 @@ fn render_directory_summary(directory: &PathHistory) -> String {
         top_authors(directory, 5)
     )
     .unwrap();
-    if let Some(commit) = directory.recent_commits.first() {
+    if let Some(commit) = directory.commits.first() {
         writeln!(
             &mut markdown,
             "- Latest change: {} by {} ({})",
@@ -657,10 +661,15 @@ fn render_directory_summary(directory: &PathHistory) -> String {
         .unwrap();
     }
     writeln!(&mut markdown).unwrap();
-    writeln!(&mut markdown, "## Recent commits touching this folder").unwrap();
+    writeln!(
+        &mut markdown,
+        "## Recent commits touching this folder (showing up to {})",
+        MARKDOWN_COMMITS_PER_NODE
+    )
+    .unwrap();
     writeln!(&mut markdown).unwrap();
 
-    for commit in &directory.recent_commits {
+    for commit in commit_preview(directory) {
         writeln!(
             &mut markdown,
             "- `{}` {} by {} on {} (`+{}` / `-{}`)",
@@ -810,8 +819,8 @@ fn collect_node_views_recursively(node: &TreeNode, report: &RepoReport, nodes: &
             .map(|history| top_authors(history, 5))
             .unwrap_or_else(|| "n/a".to_string()),
         report_links: relevant_report_links(node, report),
-        recent_commits: history
-            .map(|history| history.recent_commits.clone())
+        commits: history
+            .map(|history| history.commits.clone())
             .unwrap_or_default(),
     });
 
@@ -866,7 +875,7 @@ fn top_authors(history: &PathHistory, limit: usize) -> String {
 
 fn latest_note(history: &PathHistory) -> String {
     history
-        .recent_commits
+        .commits
         .first()
         .map(|commit| format!("{} ({})", commit.commit.subject, commit.commit.date))
         .unwrap_or_else(|| "No recent commit message".to_string())
@@ -1367,8 +1376,8 @@ function renderNode(path) {
     button.classList.toggle("node-button-selected", button.dataset.nodePath === path);
   });
 
-  const commits = node.recent_commits.length
-    ? node.recent_commits
+  const commits = node.commits.length
+    ? node.commits
         .map((entry) => {
           const churn = `+${entry.added} / -${entry.deleted}`;
           return `
@@ -1421,7 +1430,7 @@ function renderNode(path) {
       <ul class="link-list">${reportLinks}</ul>
     </section>
     <section class="list-card" style="margin-top: 16px;">
-      <h3 class="section-title">Recent Commits</h3>
+      <h3 class="section-title">Commit History (${node.commit_count})</h3>
       <ul class="commit-list">${commits}</ul>
     </section>
   `;
@@ -1442,8 +1451,9 @@ renderNode("");
 #[cfg(test)]
 mod tests {
     use super::{
-        ancestor_directories, directory_markdown_path, directory_summary_link, markdown_path,
-        parse_commit_meta, parse_numstat_line, specific_directory_chain, summary_link,
+        CommitMeta, HistoryAccumulator, ancestor_directories, directory_markdown_path,
+        directory_summary_link, markdown_path, parse_commit_meta, parse_numstat_line,
+        specific_directory_chain, summary_link,
     };
     use std::path::Path;
 
@@ -1514,5 +1524,25 @@ mod tests {
             specific_directory_chain("src/components", true),
             vec!["src/components".to_string(), "src".to_string()]
         );
+    }
+
+    #[test]
+    fn aggregates_multiple_changes_from_same_commit() {
+        let commit = CommitMeta {
+            hash: "abc123".to_string(),
+            date: "2026-04-16".to_string(),
+            author: "Jane Doe".to_string(),
+            subject: "Update folder".to_string(),
+        };
+        let mut history = HistoryAccumulator::new("src".to_string());
+
+        history.record_change(&commit, 5, 1);
+        history.record_change(&commit, 3, 2);
+
+        let history = history.into_history();
+        assert_eq!(history.commit_count, 1);
+        assert_eq!(history.commits.len(), 1);
+        assert_eq!(history.commits[0].added, 8);
+        assert_eq!(history.commits[0].deleted, 3);
     }
 }

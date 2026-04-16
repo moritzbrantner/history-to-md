@@ -19,7 +19,7 @@ The HTML viewer lets you click a folder or file and see:
 
 - the repo structure
 - relevant generated markdown reports for that node
-- recent commits that touched that folder or file
+- the full commit history that touched that folder or file
 - churn and primary author information
 
 ## Usage
