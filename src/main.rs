@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const DEFAULT_OUTPUT_DIR: &str = "history-md";
-const RECENT_COMMITS_PER_NODE: usize = 12;
+const MARKDOWN_COMMITS_PER_NODE: usize = 12;
 const SUMMARY_FILE_COUNT: usize = 20;
 const SUMMARY_DIRECTORY_COUNT: usize = 15;
 
@@ -28,6 +28,7 @@ fn run() -> Result<(), String> {
         file_histories: history.file_histories,
         directory_histories: history.directory_histories,
         tree: build_repo_tree(&config.repo_path, &config.output_dir)?,
+        agent_profile: config.agent_profile,
     };
 
     write_report(&config.output_dir, &report)?;
@@ -45,18 +46,46 @@ fn run() -> Result<(), String> {
 struct Config {
     repo_path: PathBuf,
     output_dir: PathBuf,
+    agent_profile: AgentProfile,
 }
 
 impl Config {
     fn from_args(args: &[String]) -> Result<Self, String> {
-        if args.len() < 2 || args.len() > 3 {
-            return Err(format!(
-                "usage: {} <repo-path> [output-dir]",
-                args.first().map_or("history-to-md", String::as_str)
-            ));
+        let program_name = args.first().map_or("history-to-md", String::as_str);
+        let mut positionals = Vec::new();
+        let mut agent_profile = AgentProfile::Generic;
+        let mut index = 1;
+
+        while index < args.len() {
+            match args[index].as_str() {
+                "--agent" => {
+                    let Some(value) = args.get(index + 1) else {
+                        return Err(format!(
+                            "missing value for --agent\n{}",
+                            usage(program_name)
+                        ));
+                    };
+                    agent_profile = AgentProfile::parse(value)?;
+                    index += 2;
+                }
+                argument if argument.starts_with("--") => {
+                    return Err(format!(
+                        "unknown option: {argument}\n{}",
+                        usage(program_name)
+                    ));
+                }
+                argument => {
+                    positionals.push(argument.to_string());
+                    index += 1;
+                }
+            }
         }
 
-        let repo_path = PathBuf::from(&args[1]);
+        if positionals.len() < 1 || positionals.len() > 2 {
+            return Err(usage(program_name));
+        }
+
+        let repo_path = PathBuf::from(&positionals[0]);
         if !repo_path.exists() {
             return Err(format!(
                 "repository path does not exist: {}",
@@ -64,15 +93,113 @@ impl Config {
             ));
         }
 
-        let output_dir = args
-            .get(2)
+        let output_dir = positionals
+            .get(1)
             .map(PathBuf::from)
             .unwrap_or_else(|| repo_path.join(DEFAULT_OUTPUT_DIR));
 
         Ok(Self {
             repo_path,
             output_dir,
+            agent_profile,
         })
+    }
+}
+
+fn usage(program_name: &str) -> String {
+    format!(
+        "usage: {program_name} [--agent <{}>] <repo-path> [output-dir]",
+        AgentProfile::supported_names().join("|")
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AgentProfile {
+    Generic,
+    Codex,
+    Claude,
+    Cursor,
+    Aider,
+}
+
+impl AgentProfile {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "generic" => Ok(Self::Generic),
+            "codex" => Ok(Self::Codex),
+            "claude" => Ok(Self::Claude),
+            "cursor" => Ok(Self::Cursor),
+            "aider" => Ok(Self::Aider),
+            _ => Err(format!(
+                "unknown agent profile: {value}\nsupported agent profiles: {}",
+                Self::supported_names().join(", ")
+            )),
+        }
+    }
+
+    fn supported_names() -> &'static [&'static str] {
+        &["generic", "codex", "claude", "cursor", "aider"]
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Cursor => "cursor",
+            Self::Aider => "aider",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Generic => "Generic Agent",
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+            Self::Cursor => "Cursor",
+            Self::Aider => "Aider",
+        }
+    }
+
+    fn markdown_style(self) -> &'static str {
+        match self {
+            Self::Generic => {
+                "Structured headings with concise bullets and relative links to related history files."
+            }
+            Self::Codex => {
+                "Direct engineering-oriented sections, flat bullets, and code identifiers kept in backticks."
+            }
+            Self::Claude => {
+                "Short explanatory sections with explicit headings and slightly more contextual prose."
+            }
+            Self::Cursor => {
+                "Compact IDE-friendly sections optimized for quick scanning in a sidebar or editor pane."
+            }
+            Self::Aider => {
+                "Terse patch-oriented notes that put actionable facts and recent changes near the top."
+            }
+        }
+    }
+
+    fn usage_hint(self) -> &'static str {
+        match self {
+            Self::Generic => {
+                "Use when you only need stable markdown summaries without agent-specific tuning."
+            }
+            Self::Codex => {
+                "Use when the reader is a coding agent that prefers terse, operational context."
+            }
+            Self::Claude => {
+                "Use when the reader benefits from a little more narrative framing around the raw history."
+            }
+            Self::Cursor => {
+                "Use when the markdown will mainly be inspected alongside the repo inside an editor."
+            }
+            Self::Aider => {
+                "Use when the markdown is feeding a code-editing loop that needs quick implementation context."
+            }
+        }
     }
 }
 
@@ -98,7 +225,7 @@ struct PathHistory {
     total_added: u64,
     total_deleted: u64,
     authors: HashMap<String, u64>,
-    recent_commits: Vec<FileCommit>,
+    commits: Vec<FileCommit>,
 }
 
 #[derive(Debug, Default)]
@@ -108,8 +235,8 @@ struct HistoryAccumulator {
     total_added: u64,
     total_deleted: u64,
     authors: HashMap<String, u64>,
-    recent_commits: Vec<FileCommit>,
-    seen_commits: HashSet<String>,
+    commits: Vec<FileCommit>,
+    commit_indices: HashMap<String, usize>,
 }
 
 impl HistoryAccumulator {
@@ -124,28 +251,23 @@ impl HistoryAccumulator {
         self.total_added += added;
         self.total_deleted += deleted;
 
-        if self.seen_commits.insert(commit.hash.clone()) {
-            self.commit_count += 1;
-            *self.authors.entry(commit.author.clone()).or_insert(0) += 1;
-
-            if self.recent_commits.len() < RECENT_COMMITS_PER_NODE {
-                self.recent_commits.push(FileCommit {
-                    commit: commit.clone(),
-                    added,
-                    deleted,
-                });
+        if let Some(index) = self.commit_indices.get(&commit.hash).copied() {
+            if let Some(existing) = self.commits.get_mut(index) {
+                existing.added += added;
+                existing.deleted += deleted;
             }
             return;
         }
 
-        if let Some(existing) = self
-            .recent_commits
-            .iter_mut()
-            .find(|existing| existing.commit.hash == commit.hash)
-        {
-            existing.added += added;
-            existing.deleted += deleted;
-        }
+        let index = self.commits.len();
+        self.commit_indices.insert(commit.hash.clone(), index);
+        self.commits.push(FileCommit {
+            commit: commit.clone(),
+            added,
+            deleted,
+        });
+        self.commit_count += 1;
+        *self.authors.entry(commit.author.clone()).or_insert(0) += 1;
     }
 
     fn into_history(self) -> PathHistory {
@@ -155,9 +277,13 @@ impl HistoryAccumulator {
             total_added: self.total_added,
             total_deleted: self.total_deleted,
             authors: self.authors,
-            recent_commits: self.recent_commits,
+            commits: self.commits,
         }
     }
+}
+
+fn commit_preview(history: &PathHistory) -> impl Iterator<Item = &FileCommit> {
+    history.commits.iter().take(MARKDOWN_COMMITS_PER_NODE)
 }
 
 #[derive(Debug, Default)]
@@ -174,6 +300,7 @@ struct RepoReport {
     file_histories: HashMap<String, PathHistory>,
     directory_histories: HashMap<String, PathHistory>,
     tree: TreeNode,
+    agent_profile: AgentProfile,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +314,7 @@ struct TreeNode {
 #[derive(Debug, Serialize)]
 struct HtmlReportData {
     repo_name: String,
+    agent_profile: String,
     scanned_commits: u64,
     changed_files: usize,
     changed_directories: usize,
@@ -203,7 +331,7 @@ struct NodeView {
     total_deleted: u64,
     primary_authors: String,
     report_links: Vec<ReportLink>,
-    recent_commits: Vec<FileCommit>,
+    commits: Vec<FileCommit>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -449,7 +577,7 @@ fn write_report(output_dir: &Path, report: &RepoReport) -> Result<(), String> {
             })?;
         }
 
-        fs::write(&destination, render_file_summary(file))
+        fs::write(&destination, render_file_summary(report, file))
             .map_err(|error| format!("failed to write {}: {error}", destination.display()))?;
     }
 
@@ -464,7 +592,7 @@ fn write_report(output_dir: &Path, report: &RepoReport) -> Result<(), String> {
             })?;
         }
 
-        fs::write(&destination, render_directory_summary(directory)).map_err(|error| {
+        fs::write(&destination, render_directory_summary(report, directory)).map_err(|error| {
             format!(
                 "failed to write directory summary {}: {error}",
                 destination.display()
@@ -508,9 +636,25 @@ fn render_summary(report: &RepoReport) -> String {
     let file_histories = sorted_histories(report.file_histories.values());
     let directory_histories = sorted_histories(report.directory_histories.values());
 
+    write_markdown_frontmatter(
+        &mut markdown,
+        report,
+        "repo-summary",
+        "Repository History Summary",
+        None,
+    );
     writeln!(&mut markdown, "# Repository History Summary").unwrap();
     writeln!(&mut markdown).unwrap();
+    write_agent_format_section(&mut markdown, report.agent_profile);
+    writeln!(&mut markdown, "## Snapshot").unwrap();
+    writeln!(&mut markdown).unwrap();
     writeln!(&mut markdown, "- Web viewer: [index.html](./index.html)").unwrap();
+    writeln!(
+        &mut markdown,
+        "- Agent profile: {}",
+        report.agent_profile.display_name()
+    )
+    .unwrap();
     writeln!(
         &mut markdown,
         "- Scanned commits: {}",
@@ -590,9 +734,19 @@ fn render_summary(report: &RepoReport) -> String {
     markdown
 }
 
-fn render_file_summary(file: &PathHistory) -> String {
+fn render_file_summary(report: &RepoReport, file: &PathHistory) -> String {
     let mut markdown = String::new();
+    write_markdown_frontmatter(
+        &mut markdown,
+        report,
+        "file-history",
+        &file.path,
+        Some(&file.path),
+    );
     writeln!(&mut markdown, "# {}", file.path).unwrap();
+    writeln!(&mut markdown).unwrap();
+    write_agent_format_section(&mut markdown, report.agent_profile);
+    writeln!(&mut markdown, "## Snapshot").unwrap();
     writeln!(&mut markdown).unwrap();
     writeln!(&mut markdown, "- Commits: {}", file.commit_count).unwrap();
     writeln!(
@@ -602,7 +756,7 @@ fn render_file_summary(file: &PathHistory) -> String {
     )
     .unwrap();
     writeln!(&mut markdown, "- Primary authors: {}", top_authors(file, 5)).unwrap();
-    if let Some(commit) = file.recent_commits.first() {
+    if let Some(commit) = file.commits.first() {
         writeln!(
             &mut markdown,
             "- Latest change: {} by {} ({})",
@@ -611,10 +765,15 @@ fn render_file_summary(file: &PathHistory) -> String {
         .unwrap();
     }
     writeln!(&mut markdown).unwrap();
-    writeln!(&mut markdown, "## Recent commits").unwrap();
+    writeln!(
+        &mut markdown,
+        "## Recent commits (showing up to {})",
+        MARKDOWN_COMMITS_PER_NODE
+    )
+    .unwrap();
     writeln!(&mut markdown).unwrap();
 
-    for commit in &file.recent_commits {
+    for commit in commit_preview(file) {
         writeln!(
             &mut markdown,
             "- `{}` {} by {} on {} (`+{}` / `-{}`)",
@@ -631,9 +790,19 @@ fn render_file_summary(file: &PathHistory) -> String {
     markdown
 }
 
-fn render_directory_summary(directory: &PathHistory) -> String {
+fn render_directory_summary(report: &RepoReport, directory: &PathHistory) -> String {
     let mut markdown = String::new();
+    write_markdown_frontmatter(
+        &mut markdown,
+        report,
+        "directory-history",
+        &format!("Folder: {}", directory.path),
+        Some(&directory.path),
+    );
     writeln!(&mut markdown, "# Folder: {}", directory.path).unwrap();
+    writeln!(&mut markdown).unwrap();
+    write_agent_format_section(&mut markdown, report.agent_profile);
+    writeln!(&mut markdown, "## Snapshot").unwrap();
     writeln!(&mut markdown).unwrap();
     writeln!(&mut markdown, "- Commits: {}", directory.commit_count).unwrap();
     writeln!(
@@ -648,7 +817,7 @@ fn render_directory_summary(directory: &PathHistory) -> String {
         top_authors(directory, 5)
     )
     .unwrap();
-    if let Some(commit) = directory.recent_commits.first() {
+    if let Some(commit) = directory.commits.first() {
         writeln!(
             &mut markdown,
             "- Latest change: {} by {} ({})",
@@ -657,10 +826,15 @@ fn render_directory_summary(directory: &PathHistory) -> String {
         .unwrap();
     }
     writeln!(&mut markdown).unwrap();
-    writeln!(&mut markdown, "## Recent commits touching this folder").unwrap();
+    writeln!(
+        &mut markdown,
+        "## Recent commits touching this folder (showing up to {})",
+        MARKDOWN_COMMITS_PER_NODE
+    )
+    .unwrap();
     writeln!(&mut markdown).unwrap();
 
-    for commit in &directory.recent_commits {
+    for commit in commit_preview(directory) {
         writeln!(
             &mut markdown,
             "- `{}` {} by {} on {} (`+{}` / `-{}`)",
@@ -680,6 +854,7 @@ fn render_directory_summary(directory: &PathHistory) -> String {
 fn render_html_viewer(report: &RepoReport) -> Result<String, String> {
     let html_data = HtmlReportData {
         repo_name: report.repo_name.clone(),
+        agent_profile: report.agent_profile.display_name().to_string(),
         scanned_commits: report.scanned_commits,
         changed_files: report.file_histories.len(),
         changed_directories: report.directory_histories.len().saturating_sub(1),
@@ -702,11 +877,12 @@ fn render_html_viewer(report: &RepoReport) -> Result<String, String> {
     .unwrap();
     writeln!(
         &mut html,
-        "<div class=\"shell\"><aside class=\"sidebar\"><div class=\"sidebar-header\"><p class=\"eyebrow\">History to MD</p><h1>{}</h1><p class=\"meta\">{} commits scanned • {} files with history • {} folders with history</p></div><nav class=\"tree\">{}</nav></aside><main class=\"content\"><div class=\"panel\" id=\"node-details\"></div></main></div>",
+        "<div class=\"shell\"><aside class=\"sidebar\"><div class=\"sidebar-header\"><p class=\"eyebrow\">History to MD</p><h1>{}</h1><p class=\"meta\">{} commits scanned • {} files with history • {} folders with history</p><p class=\"meta\">Markdown profile: {}</p></div><nav class=\"tree\">{}</nav></aside><main class=\"content\"><div class=\"panel\" id=\"node-details\"></div></main></div>",
         escape_html(&report.repo_name),
         report.scanned_commits,
         report.file_histories.len(),
         report.directory_histories.len().saturating_sub(1),
+        escape_html(report.agent_profile.display_name()),
         render_tree_html(&report.tree, report, 0)
     )
     .unwrap();
@@ -810,8 +986,8 @@ fn collect_node_views_recursively(node: &TreeNode, report: &RepoReport, nodes: &
             .map(|history| top_authors(history, 5))
             .unwrap_or_else(|| "n/a".to_string()),
         report_links: relevant_report_links(node, report),
-        recent_commits: history
-            .map(|history| history.recent_commits.clone())
+        commits: history
+            .map(|history| history.commits.clone())
             .unwrap_or_default(),
     });
 
@@ -864,9 +1040,55 @@ fn top_authors(history: &PathHistory, limit: usize) -> String {
     }
 }
 
+fn write_markdown_frontmatter(
+    markdown: &mut String,
+    report: &RepoReport,
+    document_kind: &str,
+    title: &str,
+    path: Option<&str>,
+) {
+    writeln!(markdown, "---").unwrap();
+    writeln!(markdown, "generated_by: history-to-md").unwrap();
+    writeln!(markdown, "format_version: 1").unwrap();
+    writeln!(markdown, "agent_profile: {}", report.agent_profile.slug()).unwrap();
+    writeln!(
+        markdown,
+        "agent_display_name: {}",
+        yaml_string(report.agent_profile.display_name())
+    )
+    .unwrap();
+    writeln!(markdown, "document_kind: {document_kind}").unwrap();
+    writeln!(markdown, "repo_name: {}", yaml_string(&report.repo_name)).unwrap();
+    writeln!(markdown, "title: {}", yaml_string(title)).unwrap();
+    if let Some(path) = path {
+        writeln!(markdown, "path: {}", yaml_string(path)).unwrap();
+    }
+    writeln!(markdown, "---").unwrap();
+    writeln!(markdown).unwrap();
+}
+
+fn write_agent_format_section(markdown: &mut String, agent_profile: AgentProfile) {
+    writeln!(markdown, "## Agent Format").unwrap();
+    writeln!(markdown).unwrap();
+    writeln!(markdown, "- Target agent: {}", agent_profile.display_name()).unwrap();
+    writeln!(
+        markdown,
+        "- Markdown style: {}",
+        agent_profile.markdown_style()
+    )
+    .unwrap();
+    writeln!(markdown, "- Usage hint: {}", agent_profile.usage_hint()).unwrap();
+    writeln!(
+        markdown,
+        "- Relative links: All markdown links stay relative to the generated history output directory."
+    )
+    .unwrap();
+    writeln!(markdown).unwrap();
+}
+
 fn latest_note(history: &PathHistory) -> String {
     history
-        .recent_commits
+        .commits
         .first()
         .map(|commit| format!("{} ({})", commit.commit.subject, commit.commit.date))
         .unwrap_or_else(|| "No recent commit message".to_string())
@@ -879,6 +1101,10 @@ fn short_hash(hash: &str) -> &str {
 
 fn escape_table_cell(value: &str) -> String {
     value.replace('|', "\\|")
+}
+
+fn yaml_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn ensure_git_repository(repo_path: &Path) -> Result<(), String> {
@@ -1367,8 +1593,8 @@ function renderNode(path) {
     button.classList.toggle("node-button-selected", button.dataset.nodePath === path);
   });
 
-  const commits = node.recent_commits.length
-    ? node.recent_commits
+  const commits = node.commits.length
+    ? node.commits
         .map((entry) => {
           const churn = `+${entry.added} / -${entry.deleted}`;
           return `
@@ -1421,7 +1647,7 @@ function renderNode(path) {
       <ul class="link-list">${reportLinks}</ul>
     </section>
     <section class="list-card" style="margin-top: 16px;">
-      <h3 class="section-title">Recent Commits</h3>
+      <h3 class="section-title">Commit History (${node.commit_count})</h3>
       <ul class="commit-list">${commits}</ul>
     </section>
   `;
@@ -1442,10 +1668,17 @@ renderNode("");
 #[cfg(test)]
 mod tests {
     use super::{
-        ancestor_directories, directory_markdown_path, directory_summary_link, markdown_path,
-        parse_commit_meta, parse_numstat_line, specific_directory_chain, summary_link,
+        AgentProfile, CommitMeta, Config, HistoryAccumulator, RepoReport, TreeNode,
+        ancestor_directories, build_repo_tree, collect_history, directory_markdown_path,
+        directory_summary_link, markdown_path, parse_commit_meta, parse_numstat_line,
+        render_html_viewer, render_summary, serialize_for_html, specific_directory_chain,
+        summary_link, write_report,
     };
+    use std::collections::HashMap;
+    use std::fs;
     use std::path::Path;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_commit_metadata() {
@@ -1513,6 +1746,222 @@ mod tests {
         assert_eq!(
             specific_directory_chain("src/components", true),
             vec!["src/components".to_string(), "src".to_string()]
+        );
+    }
+
+    #[test]
+    fn aggregates_multiple_changes_from_same_commit() {
+        let commit = CommitMeta {
+            hash: "abc123".to_string(),
+            date: "2026-04-16".to_string(),
+            author: "Jane Doe".to_string(),
+            subject: "Update folder".to_string(),
+        };
+        let mut history = HistoryAccumulator::new("src".to_string());
+
+        history.record_change(&commit, 5, 1);
+        history.record_change(&commit, 3, 2);
+
+        let history = history.into_history();
+        assert_eq!(history.commit_count, 1);
+        assert_eq!(history.commits.len(), 1);
+        assert_eq!(history.commits[0].added, 8);
+        assert_eq!(history.commits[0].deleted, 3);
+    }
+
+    #[test]
+    fn config_accepts_agent_profile_flag() {
+        let repo_path = unique_temp_path("history-to-md-config-test");
+        fs::create_dir_all(&repo_path).expect("temp repo path should be created");
+
+        let args = vec![
+            "history-to-md".to_string(),
+            "--agent".to_string(),
+            "codex".to_string(),
+            repo_path.display().to_string(),
+        ];
+        let config = Config::from_args(&args).expect("config should parse");
+
+        assert_eq!(config.repo_path, repo_path);
+        assert_eq!(config.output_dir, repo_path.join("history-md"));
+        assert_eq!(config.agent_profile, AgentProfile::Codex);
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
+    fn rejects_unknown_agent_profile() {
+        let error = AgentProfile::parse("unknown").expect_err("agent parsing should fail");
+        assert!(error.contains("supported agent profiles: generic, codex, claude, cursor, aider"));
+    }
+
+    #[test]
+    fn summary_includes_agent_frontmatter() {
+        let report = RepoReport {
+            repo_name: "demo".to_string(),
+            scanned_commits: 12,
+            file_histories: HashMap::new(),
+            directory_histories: HashMap::new(),
+            tree: TreeNode {
+                path: String::new(),
+                name: "demo".to_string(),
+                is_dir: true,
+                children: Vec::new(),
+            },
+            agent_profile: AgentProfile::Codex,
+        };
+
+        let markdown = render_summary(&report);
+        assert!(markdown.contains("agent_profile: codex"));
+        assert!(markdown.contains("## Agent Format"));
+        assert!(markdown.contains("- Target agent: Codex"));
+    }
+
+    #[test]
+    fn repo_tree_skips_git_and_generated_output() {
+        let repo_path = unique_temp_path("history-to-md-tree-test");
+        fs::create_dir_all(repo_path.join(".git")).expect("git dir should exist");
+        fs::create_dir_all(repo_path.join("src")).expect("src dir should exist");
+        fs::create_dir_all(repo_path.join("history-md")).expect("output dir should exist");
+        fs::write(repo_path.join("src/main.rs"), "fn main() {}\n")
+            .expect("source file should exist");
+        fs::write(repo_path.join("history-md/SUMMARY.md"), "# generated\n")
+            .expect("generated file should exist");
+
+        let tree = build_repo_tree(&repo_path, &repo_path.join("history-md"))
+            .expect("tree should build successfully");
+
+        let child_names: Vec<_> = tree
+            .children
+            .iter()
+            .map(|child| child.name.as_str())
+            .collect();
+        assert!(child_names.contains(&"src"));
+        assert!(!child_names.contains(&".git"));
+        assert!(!child_names.contains(&"history-md"));
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    #[test]
+    fn html_serialization_escapes_script_terminators() {
+        let serialized =
+            serialize_for_html(&vec!["</script>".to_string()]).expect("json should serialize");
+        assert!(serialized.contains("<\\/script>"));
+    }
+
+    #[test]
+    fn generates_reports_for_a_real_git_repository() {
+        let repo_path = unique_temp_path("history-to-md-e2e-test");
+        fs::create_dir_all(&repo_path).expect("temp repo path should be created");
+        init_git_repository(&repo_path);
+
+        write_file(&repo_path.join("README.md"), "# demo\n");
+        git_commit(&repo_path, "Add readme", "Jane Doe", "jane@example.com");
+
+        write_file(
+            &repo_path.join("src/main.rs"),
+            "fn main() {\n    println!(\"hi\");\n}\n",
+        );
+        write_file(&repo_path.join("README.md"), "# demo\n\nupdated\n");
+        git_commit(&repo_path, "Add CLI", "John Roe", "john@example.com");
+
+        let history = collect_history(&repo_path).expect("history should collect");
+        assert_eq!(history.scanned_commits, 2);
+        assert!(history.file_histories.contains_key("README.md"));
+        assert!(history.file_histories.contains_key("src/main.rs"));
+        assert!(history.directory_histories.contains_key("src"));
+
+        let output_dir = repo_path.join("history-md");
+        let report = RepoReport {
+            repo_name: "demo".to_string(),
+            scanned_commits: history.scanned_commits,
+            file_histories: history.file_histories,
+            directory_histories: history.directory_histories,
+            tree: build_repo_tree(&repo_path, &output_dir).expect("tree should build"),
+            agent_profile: AgentProfile::Codex,
+        };
+
+        write_report(&output_dir, &report).expect("report should be written");
+
+        let summary =
+            fs::read_to_string(output_dir.join("SUMMARY.md")).expect("summary should be readable");
+        let file_summary = fs::read_to_string(output_dir.join("files/src/main.rs.md"))
+            .expect("file summary should be readable");
+        let directory_summary = fs::read_to_string(output_dir.join("dirs/src/INDEX.md"))
+            .expect("directory summary should be readable");
+        let html =
+            fs::read_to_string(output_dir.join("index.html")).expect("html should be readable");
+
+        assert!(summary.contains("agent_profile: codex"));
+        assert!(summary.contains("- Agent profile: Codex"));
+        assert!(file_summary.contains("# src/main.rs"));
+        assert!(file_summary.contains("## Agent Format"));
+        assert!(file_summary.contains("Add CLI by John Roe"));
+        assert!(directory_summary.contains("# Folder: src"));
+        assert!(html.contains("Markdown profile: Codex"));
+        assert!(html.contains("Repository summary"));
+        assert!(
+            render_html_viewer(&report)
+                .expect("html should render")
+                .contains("node-details")
+        );
+
+        fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
+    }
+
+    fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nonce}"))
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent directory should be created");
+        }
+        fs::write(path, contents).expect("file should be written");
+    }
+
+    fn init_git_repository(repo_path: &Path) {
+        run_git(repo_path, &["init"], &[]);
+        run_git(repo_path, &["config", "user.name", "Test User"], &[]);
+        run_git(
+            repo_path,
+            &["config", "user.email", "test@example.com"],
+            &[],
+        );
+    }
+
+    fn git_commit(repo_path: &Path, message: &str, author_name: &str, author_email: &str) {
+        run_git(repo_path, &["add", "."], &[]);
+        run_git(
+            repo_path,
+            &["commit", "-m", message],
+            &[
+                ("GIT_AUTHOR_NAME", author_name),
+                ("GIT_AUTHOR_EMAIL", author_email),
+                ("GIT_COMMITTER_NAME", author_name),
+                ("GIT_COMMITTER_EMAIL", author_email),
+            ],
+        );
+    }
+
+    fn run_git(repo_path: &Path, args: &[&str], envs: &[(&str, &str)]) {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(repo_path).args(args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        let output = command.output().expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }
