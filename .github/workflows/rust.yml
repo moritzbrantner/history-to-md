@@ -25,11 +25,10 @@ jobs:
         with:
           toolchain: 1.98.0
           components: rustfmt, clippy
-      - name: Report formatting drift
-        continue-on-error: true
+      - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings -A clippy::len_zero -A clippy::collapsible_if
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Build
         run: cargo build --locked --all-targets
       - name: Run tests
