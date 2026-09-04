@@ -4,6 +4,6 @@
   "tiers": {
     "fast": ["lint", "build", "test:unit"]
   },
-  "requiredCapabilities": ["lint", "build", "test:unit"],
-  "optionalCapabilities": ["format:check"]
+  "requiredCapabilities": ["format:check", "lint", "build", "test:unit"],
+  "optionalCapabilities": []
 }

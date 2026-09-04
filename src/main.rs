@@ -121,7 +121,7 @@ impl Config {
             }
         }
 
-        if positionals.len() < 1 || positionals.len() > 2 {
+        if positionals.is_empty() || positionals.len() > 2 {
             return Err(usage(program_name));
         }
 
@@ -1637,13 +1637,13 @@ fn collect_node_views_recursively(node: &TreeNode, report: &RepoReport, nodes: &
 fn relevant_report_links(node: &TreeNode, report: &RepoReport) -> Vec<ReportLink> {
     let mut links = Vec::new();
 
-    if node.path.is_empty() {
-        if let Some(manifest_href) = report.skills_manifest_href.as_ref() {
-            links.push(ReportLink {
-                label: "Skills manifest".to_string(),
-                href: manifest_href.clone(),
-            });
-        }
+    if node.path.is_empty()
+        && let Some(manifest_href) = report.skills_manifest_href.as_ref()
+    {
+        links.push(ReportLink {
+            label: "Skills manifest".to_string(),
+            href: manifest_href.clone(),
+        });
     }
 
     if !node.is_dir && report.file_histories.contains_key(&node.path) {
@@ -2617,12 +2617,10 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(
-            error.contains(&format!(
-                "skills database path does not exist: {}",
-                missing_database.display()
-            ))
-        );
+        assert!(error.contains(&format!(
+            "skills database path does not exist: {}",
+            missing_database.display()
+        )));
 
         fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
     }
@@ -2725,7 +2723,10 @@ mod tests {
             ..any_skill.clone()
         };
 
-        assert_eq!(matched_technology_ids(&any_skill, &detected_one), vec!["rust"]);
+        assert_eq!(
+            matched_technology_ids(&any_skill, &detected_one),
+            vec!["rust"]
+        );
         assert!(matched_technology_ids(&all_skill, &detected_one).is_empty());
         assert_eq!(
             matched_technology_ids(&all_skill, &detected_two),
@@ -2917,8 +2918,14 @@ mod tests {
         .expect("skill should be added");
 
         assert_eq!(skills.added_skills.len(), 1);
-        assert_eq!(skills.added_skills[0].location, install_dir.join("rust-review").display().to_string());
-        assert_eq!(skills.added_skills[0].href.as_deref(), Some("skills/rust-review"));
+        assert_eq!(
+            skills.added_skills[0].location,
+            install_dir.join("rust-review").display().to_string()
+        );
+        assert_eq!(
+            skills.added_skills[0].href.as_deref(),
+            Some("skills/rust-review")
+        );
         assert!(install_dir.join("rust-review").is_file());
 
         fs::remove_dir_all(&repo_path).expect("temp repo path should be cleaned up");
@@ -3056,7 +3063,10 @@ mod tests {
             relative_href(output_dir, &output_dir.join("skills/manifest.json")).as_deref(),
             Some("skills/manifest.json")
         );
-        assert_eq!(relative_href(output_dir, Path::new("/tmp/elsewhere/file.txt")), None);
+        assert_eq!(
+            relative_href(output_dir, Path::new("/tmp/elsewhere/file.txt")),
+            None
+        );
     }
 
     #[test]
