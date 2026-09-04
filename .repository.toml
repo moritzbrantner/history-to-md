@@ -1,0 +1,9 @@
+schema_version = 1
+id = "moritzbrantner/history-to-md"
+kind = "infrastructure"
+status = "maintenance"
+summary = "Generate durable Markdown and HTML repository context from Git history for coding agents."
+depends_on = []
+consumed_by = []
+supersedes = []
+replaced_by = []
