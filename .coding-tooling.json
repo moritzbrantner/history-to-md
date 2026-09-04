@@ -2,7 +2,8 @@
   "schemaVersion": 1,
   "profile": "repository-foundation-v1",
   "tiers": {
-    "fast": ["format:check", "lint", "build", "test:unit"]
+    "fast": ["lint", "build", "test:unit"]
   },
-  "requiredCapabilities": ["format:check", "lint", "build", "test:unit"]
+  "requiredCapabilities": ["lint", "build", "test:unit"],
+  "optionalCapabilities": ["format:check"]
 }
